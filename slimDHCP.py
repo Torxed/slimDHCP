@@ -74,7 +74,7 @@ class tftp(Thread):
 					resp = b'\x00\x03'+struct.pack('>H', block+1)+data
 					self.sock.sendto(resp, (addr[0], addr[1]))
 
-if len(sys.argv) > 2
+if len(sys.argv) > 2:
 	tftp()
 
 sock = socket(AF_INET, SOCK_DGRAM) # UDP
