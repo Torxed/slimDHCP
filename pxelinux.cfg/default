@@ -1,0 +1,6 @@
+default linux
+timeout 0
+
+label linux
+	kernel vmlinuz-linux
+	append initrd=initramfs-linux.img
