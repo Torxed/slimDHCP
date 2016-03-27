@@ -3,7 +3,7 @@ A very slim DHCP server
 
 binary/helpers.py
 ---
-A file to work with bytes() and raw packets a little easier.
+A way to work with bytes() and raw packets a little easier.
 Not saying they're perfect or make the most sense to everyone.
 
 But I like looking at packets in binary form to make sense of them.
