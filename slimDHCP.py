@@ -12,7 +12,6 @@ __boot__ = b'/pxe_syslinux/lpxelinux.0'
 #
 # import tftp 
 
-
 sock = socket(AF_INET, SOCK_DGRAM) # UDP
 sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
 sock.setsockopt(SOL_SOCKET, SO_BROADCAST, 1)
