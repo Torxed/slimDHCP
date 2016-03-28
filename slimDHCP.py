@@ -1,10 +1,30 @@
 from socket import *
 from binary.helpers import *
 
-#__boot__ = b'/pxe_grub/grub.pxe'  # <-- Almost works
+def gen_ip(subnet, netmask, exludes=[]):
+	## TODO: Add support for partial subnets
+	## ++ bigInt needs a parameter for this!
+	octets = netmask.count(b'\x00')+1
+	for ip in range(255*(netmask.count(b'\x00')+1)):
+		if ip == 0 or ip == 255: continue ## Avoid broadcast and looping replace (replacing \x00 with \x00, for now)
+
+		generated_ip = b_fill(bigInt(ip), subnet.count(b'\x00'))
+		ip = subnet.replace(b'\x00'*len(generated_ip), generated_ip)
+		if not ip in exludes:
+			return ip
+
 __boot__ = b'/pxe_syslinux/lpxelinux.0'
+#__boot__ = b'/pxe_grub/grub.pxe'  # <-- Almost works
 #__boot__ = b'/pxe_grub/grub2pxe'
 #__boot__ = b'/pxe_grub/bootx64.efi'
+__subnet__ = int_array_to_hex([172,16,0,0])
+__netmask__ = int_array_to_hex([255,255,255,0])
+
+## Set up a memory of which IP's we've given out this session
+## And start by adding our own IP to that pool hehe.
+__actives__ = {}
+__clients__ = {'localhost' : gen_ip(__subnet__, __netmask__, __actives__)}
+__actives__[__clients__['localhost']] = 'localhost'
 
 ## a TFTP server (extremely basic) is included
 #  - Uncomment the line below or start a tftp server along side this script
@@ -54,7 +74,14 @@ while True:
 		request['dhcp_options'][item] = { 'binary' : dhcp_options[item],
 										  'hex' : bin_str_to_byte([dhcp_options[item]])}
 
-	pxe_host = int_array_to_hex([172,16,0,1])
+	## If the MAC (in bytes() format) isn't in the known list
+	## generate a new IP for that person. For now we don't have a cleanup period for this.
+	## (basic basic for now)
+	if not request['client mac']['hex'] in __clients__:
+		__clients__[request['client mac']['hex']] = gen_ip(__subnet__, __netmask__, __actives__)
+		__actives__[__clients__[request['client mac']['hex']]] = request['client mac']['hex']
+
+	pxe_host = int_array_to_hex([172,16,0,1]) ## Could use __clients__['localhost'] but not as intuative
 	pxe_file = __boot__#b'/pxelinux.0'
 	packet = b''
 	if request['msg type']['hex'] == b'\x01': # Message type: Boot request (1)
@@ -66,7 +93,7 @@ while True:
 		packet += b'\x00\x00'  #Seconds elapsed: 0
 		packet += b'\x80\x00'   #Bootp flags: 0x8000 (Broadcast) + reserved flags
 		packet += b'\x00\x00\x00\x00'   # Client IP address: 0.0.0.0
-		packet += int_array_to_hex([172,16,0,100])   # The IP offered to the client
+		packet += __clients__[request['client mac']['hex']]   # The IP offered to the client
 		if pxe_file:
 			packet += pxe_host
 		else:
@@ -83,8 +110,10 @@ while True:
 
 		## This is basically what differs in a basic basic DHCP sequence, the message type recieved and matching response.
 		if request['option 53']['hex'][-1] == 1: # DHCP Discover
+			print('[DISCOVER]', ':'.join([item[2:].zfill(2) for item in binToObj(request['client mac']['hex'], hex)]))
 			packet += binInt(53)+b'\x01\x02'   # DHCP Offer
 		if request['option 53']['hex'][-1] == 3: # DHCP Request
+			print('[PROVIDED]', '.'.join([str(item) for item in binToObj(__clients__[request['client mac']['hex']], int)]))
 			packet += binInt(53)+b'\x01\x05'   # Message Type ACK 
 		""" <<<
 			1 = DHCP Discover message (DHCPDiscover).
@@ -98,7 +127,7 @@ while True:
 		"""
 		packet += binInt(54)+b'\x04'+int_array_to_hex([172,16,0,1]) #DHCP Server Identifier
 		packet += binInt(51)+b'\x04\x00\x00\xa8\xc0'#+b_fill(binInt(43200), 4) #Lease time (seconds)
-		packet += binInt(1)+b'\x04'+int_array_to_hex([255,255,255,0]) #Subnet mask
+		packet += binInt(1)+b'\x04'+__netmask__ #Subnet mask
 		packet += binInt(3)+b'\x04'+int_array_to_hex([172,16,0,1]) # Router
 		packet += binInt(6)+b'\x08'+int_array_to_hex([8,8,8,8])+int_array_to_hex([4,4,4,4]) # Domain name servers
 
