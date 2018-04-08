@@ -1,5 +1,25 @@
+import sys
 from socket import *
 from binary.helpers import *
+
+args = {}
+positionals = []
+for arg in sys.argv[1:]:
+	if '--' == arg[:2]:
+		if '=' in arg:
+			key, val = [x.strip() for x in arg[2:].split('=')]
+		else:
+			key, val = arg[2:], True
+		args[key] = val
+	else:
+		positionals.append(arg)
+
+if not 'interface' in args: args['interface'] = 'eth0'
+if not 'subnet' in args: args['subnet'] = '192.168.0.0'
+if not 'netmask' in args: args['netmask'] = '255.255.255.0'
+if not 'gateway' in args: args['gateway'] = args['subnet'][:args['subnet'].rfind('.')] + '.1' # TODO: Don't assume
+if not 'pxe' in args: args['pxe'] = None
+args['interface'] = bytes(args['interface'], 'UTF-8')+b'\0'
 
 def gen_ip(subnet, netmask, exludes=[]):
 	## TODO: Add support for partial subnets
@@ -17,8 +37,8 @@ __boot__ = b'/pxe_syslinux/lpxelinux.0'
 #__boot__ = b'/pxe_grub/grub.pxe'  # <-- Almost works
 #__boot__ = b'/pxe_grub/grub2pxe'
 #__boot__ = b'/pxe_grub/bootx64.efi'
-__subnet__ = int_array_to_hex([172,16,0,0])
-__netmask__ = int_array_to_hex([255,255,255,0])
+__subnet__ = int_array_to_hex(args['subnet'].split('.'))
+__netmask__ = int_array_to_hex(args['netmask'].split('.'))
 
 ## Set up a memory of which IP's we've given out this session
 ## And start by adding our own IP to that pool hehe.
@@ -35,7 +55,7 @@ __actives__[__clients__['localhost']] = 'localhost'
 sock = socket(AF_INET, SOCK_DGRAM) # UDP
 sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
 sock.setsockopt(SOL_SOCKET, SO_BROADCAST, 1)
-sock.setsockopt(SOL_SOCKET, 25, b'ens37\0') # Interface which to bind the broadcast domain to
+sock.setsockopt(SOL_SOCKET, 25, args['interface'])
 sock.bind(('255.255.255.255', 67)) # And lets listen on port 67 broadcasts (UDP)
 
 dhcp_packet_struct = [1, 1, 1, 1, 4, 2, 2, 4, 4, 4, 4, 6, 10, 64, 128, 4, 3]
@@ -81,8 +101,7 @@ while True:
 		__clients__[request['client mac']['hex']] = gen_ip(__subnet__, __netmask__, __actives__)
 		__actives__[__clients__[request['client mac']['hex']]] = request['client mac']['hex']
 
-	pxe_host = int_array_to_hex([172,16,0,1]) ## Could use __clients__['localhost'] but not as intuative
-	pxe_file = __boot__#b'/pxelinux.0'
+	pxe_host = int_array_to_hex(args['gateway'].split('.')) ## Could use __clients__['localhost'] but not as intuative
 	packet = b''
 	if request['msg type']['hex'] == b'\x01': # Message type: Boot request (1)
 		packet += b'\x02'   #Message type: DHCP Offer
@@ -94,15 +113,25 @@ while True:
 		packet += b'\x80\x00'   #Bootp flags: 0x8000 (Broadcast) + reserved flags
 		packet += b'\x00\x00\x00\x00'   # Client IP address: 0.0.0.0
 		packet += __clients__[request['client mac']['hex']]   # The IP offered to the client
-		if pxe_file:
-			packet += pxe_host
+		if args['pxe']:
+			## --pxe=192.168.0.1:pxe_boot.bin
+			if not ':' in args['pxe']:
+				pxe_host = int_array_to_hex(args['gateway'].split('.'))
+			else:
+				pxe_host = args['pxe'].split(':',1)[0]
+			packet += int_array_to_hex(pxe_host.split('.'))
 		else:
 			packet += b'\x00\x00\x00\x00'   # "Next server", if not PXE, 0.0.0.0
 		packet += b'\x00\x00\x00\x00'   # Relay agent IP address: 0.0.0.0 because I have no idea what this is heh
 		packet += request['client mac']['hex'] # Client MAC address: 00:26:9e:04:1e:9b
 		packet += b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'   # Client hardware address padding: (Legacy stuff)
 		packet += b'\x00' * 64  # Server host name not supplied, so Zero this out
-		if pxe_file:
+		if args['pxe']:
+			## --pxe=192.168.0.1:pxe_boot.bin
+			if ':' in args['pxe']:
+				pxe_file = args['pxe'].split(':',1)[1]
+			else:
+				pxe_file = args['pxe']
 			packet += pxe_file+(b'\x00' * (128-len(pxe_file))) # Pxe filename
 		else:
 			packet += b'\x00' * 128 # Otherwise we zero it out

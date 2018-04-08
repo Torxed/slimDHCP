@@ -63,7 +63,7 @@ def int_array_to_hex(ia):
 	""" takes a list() of int() types and convert them to a bytes() string with proper hex(\x00) declaration """
 	b = b''
 	for i in ia:
-		b += hexInt(i)
+		b += hexInt(int(i))
 	return b
 
 def b_fill(byte, l):
