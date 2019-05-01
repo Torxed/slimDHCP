@@ -114,7 +114,7 @@ def gen_ip(subnet, netmask, exludes=[]):
 	## ++ bigInt needs a parameter for this!
 	octets = netmask.count(b'\x00')+1
 	for ip in range(255*(netmask.count(b'\x00')+1)):
-		if ip == 0 or ip == 255: continue ## Avoid broadcast and looping replace (replacing \x00 with \x00, for now)
+		if ip in (0, 1, 255): continue ## Avoid broadcast and looping replace (replacing \x00 with \x00, for now)
 		print('IP:', ip)
 
 		ending_octets = b_fill(bigInt(ip), subnet.count(b'\x00'))
@@ -208,7 +208,7 @@ class dhcp_serve():
 			## If the MAC (in bytes() format) isn't in the known list
 			## generate a new IP for that person. For now we don't have a cleanup period for this.
 			## (basic basic for now)
-			if not request['client mac']['bytes'] in datastore['dhcp']['*leases']:
+			if not request['client mac']['hex'] in datastore['dhcp']['*leases']:
 				ip_leased = gen_ip(bytes(datastore['dhcp']['subnet'], 'UTF-8'), bytes(datastore['dhcp']['netmask'], 'UTF-8'), datastore['dhcp']['*ip_uses'])
 				if ip_leased:
 					datastore['dhcp']['*leases'][request['client mac']['hex']] = ip_leased
@@ -279,6 +279,13 @@ class dhcp_serve():
 					packet += binInt(210)+struct.pack('B', len('/arch/'))+bytes('/arch/', 'UTF-8') # PXE Path Prefix
 					packet += binInt(209)+struct.pack('B', len('loader/loader.conf'))+bytes('loader/loader.conf', 'UTF-8') # PXE Configuration file
 
+
+				broadcast = int_array_to_hexbytes(ip_to_int('172.16.255.255'))
+				packet += binInt(28)+struct.pack('B', len(broadcast))+broadcast # Broadcast Address
+				renewal_time = struct.pack('>I', 21600)
+				rebind_time = struct.pack('>I', 37800)
+				packet += binInt(58)+struct.pack('B', len(renewal_time))+renewal_time # Renewal Time Value
+				packet += binInt(59)+struct.pack('B', len(rebind_time))+rebind_time # Rebinding Time Value
 				packet += binInt(1)+b'\x04'+int_array_to_hexbytes(ip_to_int(datastore['dhcp']['netmask'])) #Subnet mask
 				packet += binInt(3)+b'\x04'+int_array_to_hexbytes(ip_to_int(datastore['dhcp']['gateway'])) # Router
 				packet += binInt(6)+b'\x08'+int_array_to_hexbytes([8,8,8,8])+int_array_to_hexbytes([4,4,4,4]) # Domain name servers
