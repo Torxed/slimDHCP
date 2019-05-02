@@ -16,9 +16,9 @@ for arg in sys.argv[1:]:
 
 if not 'interface' in args: args['interface'] = 'eth0'
 if not 'subnet' in args: args['subnet'] = '192.168.0.0'
-if not 'netmask' in args: args['netmask'] = '255.255.255.0'
+if not 'netmask' in args: args['netmask'] = '255.255.0.0'
 if not 'gateway' in args: args['gateway'] = args['subnet'][:args['subnet'].rfind('.')] + '.1' # TODO: Don't assume
-if not 'pxe' in args: args['pxe'] = None
+if not 'pxe' in args: args['pxe'] = '/ipxe.efi'
 if not 'pxe_dir' in args: args['pxe_dir'] = './pxe_files'
 
 def byte_to_bin(bs, bin_map=None):
@@ -274,21 +274,19 @@ class dhcp_serve():
 				packet += binInt(51)+b'\x04\x00\x00\xa8\xc0'#+b_fill(binInt(43200), 4) #Lease time (seconds)
 				## Begin PXE stuff:
 				if datastore['dhcp']['pxe']:
+					renewal_time = struct.pack('>I', 21600)
+					rebind_time = struct.pack('>I', 37800)
+					broadcast = int_array_to_hexbytes(ip_to_int('172.16.255.255'))
 					packet += binInt(67)+struct.pack('B', len(datastore['dhcp']['pxe'])+1)+bytes(datastore['dhcp']['pxe'], 'UTF-8')+b'\0' # Bootfile name
+					packet += binInt(58)+struct.pack('B', len(renewal_time))+renewal_time # Renewal Time Value
+					packet += binInt(59)+struct.pack('B', len(rebind_time))+rebind_time # Rebinding Time Value
+					packet += binInt(1)+b'\x04'+int_array_to_hexbytes(ip_to_int(datastore['dhcp']['netmask'])) #Subnet mask
+					packet += binInt(28)+struct.pack('B', len(broadcast))+broadcast # Broadcast Address
+					packet += binInt(3)+b'\x04'+int_array_to_hexbytes(ip_to_int(datastore['dhcp']['gateway'])) # Router
 					packet += binInt(66)+struct.pack('B', len(datastore['dhcp']['gateway'])+1)+bytes(datastore['dhcp']['gateway'], 'UTF-8')+b'\0' # TFTP Server Name (IP valid)
 					packet += binInt(210)+struct.pack('B', len('/arch/'))+bytes('/arch/', 'UTF-8') # PXE Path Prefix
 					packet += binInt(209)+struct.pack('B', len('loader/loader.conf'))+bytes('loader/loader.conf', 'UTF-8') # PXE Configuration file
-
-
-				broadcast = int_array_to_hexbytes(ip_to_int('172.16.255.255'))
-				packet += binInt(28)+struct.pack('B', len(broadcast))+broadcast # Broadcast Address
-				renewal_time = struct.pack('>I', 21600)
-				rebind_time = struct.pack('>I', 37800)
-				packet += binInt(58)+struct.pack('B', len(renewal_time))+renewal_time # Renewal Time Value
-				packet += binInt(59)+struct.pack('B', len(rebind_time))+rebind_time # Rebinding Time Value
-				packet += binInt(1)+b'\x04'+int_array_to_hexbytes(ip_to_int(datastore['dhcp']['netmask'])) #Subnet mask
-				packet += binInt(3)+b'\x04'+int_array_to_hexbytes(ip_to_int(datastore['dhcp']['gateway'])) # Router
-				packet += binInt(6)+b'\x08'+int_array_to_hexbytes([8,8,8,8])+int_array_to_hexbytes([4,4,4,4]) # Domain name servers
+					packet += binInt(6)+b'\x08'+int_array_to_hexbytes([8,8,8,8])+int_array_to_hexbytes([4,4,4,4]) # Domain name servers
 
 				packet += b'\xff'   #End Option
 				#packet += b'\x00'*22 # Padding, not sure how much is needed atm but this does it :)
