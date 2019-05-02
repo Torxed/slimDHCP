@@ -106,20 +106,16 @@ def ip_to_int(ip):
 	return [int(x) for x in ip.split('.')]
 
 def gen_ip(subnet, netmask, exludes=[]):
-	print('Generating IP based off:', subnet, netmask, exludes)
 	subnet = b''.join([struct.pack('B', int(x)) for x in subnet.split(b'.')])
 	netmask = b''.join([struct.pack('B', int(x)) for x in netmask.split(b'.')])
-	print('Generating IP based off:', subnet, netmask, exludes)
 	## TODO: Add support for partial subnets
 	## ++ bigInt needs a parameter for this!
 	octets = netmask.count(b'\x00')+1
 	for ip in range(255*(netmask.count(b'\x00')+1)):
 		if ip in (0, 1, 255): continue ## Avoid broadcast and looping replace (replacing \x00 with \x00, for now)
-		print('IP:', ip)
 
 		ending_octets = b_fill(bigInt(ip), subnet.count(b'\x00'))
 		ip = subnet[:len(subnet)-len(ending_octets)] + ending_octets
-		print('IP:', ip)
 		if not ip in exludes:
 			return ip
 
@@ -158,7 +154,7 @@ class dhcp_serve():
 		self.pollobj = epoll()
 		self.pollobj.register(self.main_so_id, EPOLLIN)
 
-	def poll(self, timeout=0.025, fileno=None):
+	def poll(self, timeout=0.001, fileno=None):
 		d = dict(self.pollobj.poll(timeout))
 		if fileno: return d[fileno] if fileno in d else None
 		return d
@@ -255,10 +251,12 @@ class dhcp_serve():
 
 				## This is basically what differs in a basic basic DHCP sequence, the message type recieved and matching response.
 				if request['option 53']['bytes'][-1] == 1: # DHCP Discover
-					print('[DISCOVER]', ':'.join([item[2:].zfill(2) for item in binToObj(request['client mac']['bytes'], hex)]))
+					print('[DISCOVER] {} (Offering: {})'.format(':'.join([item[2:].zfill(2) for item in binToObj(request['client mac']['bytes'], hex)]), '.'.join([str(item) for item in binToObj(datastore['dhcp']['*leases'][request['client mac']['hex']], int)])))
+					#print('[DISCOVER]', )
 					packet += binInt(53)+b'\x01\x02'   # DHCP Offer
 				if request['option 53']['bytes'][-1] == 3: # DHCP Request
-					print('[PROVIDED]', '.'.join([str(item) for item in binToObj(datastore['dhcp']['*leases'][request['client mac']['hex']], int)]))
+					print('[PROVIDED] {} with {}'.format(':'.join([item[2:].zfill(2) for item in binToObj(request['client mac']['bytes'], hex)]), '.'.join([str(item) for item in binToObj(datastore['dhcp']['*leases'][request['client mac']['hex']], int)])))
+					#print('[PROVIDED]', '.'.join([str(item) for item in binToObj(datastore['dhcp']['*leases'][request['client mac']['hex']], int)]))
 					packet += binInt(53)+b'\x01\x05'   # Message Type ACK 
 				""" <<<
 					1 = DHCP Discover message (DHCPDiscover).

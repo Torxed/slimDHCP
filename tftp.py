@@ -1,8 +1,9 @@
-import struct
-from threading import *
+import struct, time
 from os.path import isfile, abspath, getsize
+from socket import *
+from select import epoll, EPOLLIN
 
-__TFTProot__ = '/srv/tftp/'
+__TFTProot__ = './pxe_files/'
 
 	## -- Trying to boot windows as natively as possible:
 	#
@@ -29,35 +30,47 @@ __TFTProot__ = '/srv/tftp/'
 	# 
 	# grub-mkimage --format=i386-pc-pxe -d /usr/lib/grub/i386-pc/ --output=grub.pxe --prefix='(pxe)/boot/grub' pxe pxechain
 
-class tftp(Thread):
-	def __init__(self):
-		Thread.__init__(self)
+class tftp():
+	def __init__(self, root, interface=None):
+		if not interface: interface = 'br0'
+		if not root: root = __TFTProot__
 		self.sock = socket(AF_INET, SOCK_DGRAM) # UDP
+
+		## https://www.freepascal.org/docs-html/current/rtl/sockets/index-2.html
 		self.sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
 		self.sock.setsockopt(SOL_SOCKET, SO_BROADCAST, 1)
-		self.sock.setsockopt(SOL_SOCKET, 25, b'ens37\0')
+		## Not sure we need this:
+		self.sock.setsockopt(SOL_SOCKET, 25, bytes(interface, 'UTF-8')+b'\0') ## http://fxr.watson.org/fxr/source/net/wanrouter/af_wanpipe.c?v=linux-2.6
 		self.sock.bind(('172.16.0.1', 69))
-		self.start()
+		self.main_so_id = self.sock.fileno()
+
+		self.pollobj = epoll()
+		self.pollobj.register(self.main_so_id, EPOLLIN)
 
 		self.active_file = None
 		self.block_size = None
+		self.root = root
 
-	def run(self):
-		main = None
-		for t in enumerate():
-			if t.name == 'MainThread':
-				main = t
-				break
+	def poll(self, timeout=0.001, fileno=None):
+		d = dict(self.pollobj.poll(timeout))
+		if fileno: return d[fileno] if fileno in d else None
+		return d
 
-		while main and main.isAlive():
-			data, addr = self.sock.recvfrom(8192) # buffer size is 1024 bytes
+	def close(self):
+		self.pollobj.unregister(self.main_so_id)
+		self.sock.close()
+
+	def parse(self):
+		if self.poll():
+			data, addr = self.sock.recvfrom(8192)
+			print(addr, data)
 
 			msg_type = struct.unpack('>H', data[:2])
 
 			if msg_type[0] == 1: # READ request
 				file, data = data[2:].split(b'\x00',1)
 				file = file.decode('utf-8')
-				abspath_pxefile = __TFTProot__+abspath(file)
+				abspath_pxefile = abspath(self.root+'/'+file)
 				print('TFTP:', abspath(abspath_pxefile))
 				if isfile(abspath_pxefile):
 					self.active_file = abspath_pxefile
@@ -73,7 +86,7 @@ class tftp(Thread):
 					self.block_size = int(conf[b'blksize'])
 
 					resp = b'\x00\x06'
-					if b'tsize' in conf:
+					if b'tsize' in data and b'tsize' in conf:
 						resp += b'tsize\x00'+conf[b'tsize']+b'\x00'
 					if b'blksize' in conf:
 						resp += b'blksize\x00'+conf[b'blksize']+b'\x00'
@@ -95,9 +108,13 @@ class tftp(Thread):
 						resp = b'\x00\x03'+struct.pack('>H', block+1)
 						self.sock.sendto(resp, (addr[0], addr[1]))
 						print('TFTP:',self.active_file,'[DONE]')
-						continue
+						return
 
 					resp = b'\x00\x03'+struct.pack('>H', block+1)+data
 					self.sock.sendto(resp, (addr[0], addr[1]))
 
-tftp()
+if __name__ == '__main__':
+	t = tftp(__TFTProot__)
+	while 1:
+		if t.poll():
+			t.parse()
