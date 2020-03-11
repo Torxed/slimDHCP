@@ -31,8 +31,14 @@ if not 'interface' in args:
 if not 'subnet' in args: args['subnet'] = '192.168.1.0'
 if not 'netmask' in args: args['netmask'] = '255.255.255.0' # Optional, if it's given on the subnet definition.
 if not 'gateway' in args: args['gateway'] = None # Takes the first host of the subnet by default
-if not 'pxe_bin' in args: args['pxe'] = None # Point toward a efi file, for instance: '/ipxe.efi'
+if not 'pxe_bin' in args: args['pxe_bin'] = None # Point toward a efi file, for instance: '/ipxe.efi'
 if not 'pxe_dir' in args: args['pxe_dir'] = './'# './pxe_files'
+if not 'pxe_config' in args: args['pxe_config'] = 'loader/loader.conf'
+if not 'pxe_server' in args:
+	if args['pxe_bin']:
+		args['pxe_server'] = args['gateway']
+	else:
+		args['pxe_server'] = '0.0.0.0'
 if not 'filter_clients' in args: args['filter_clients'] = '{}' # JSON structure of clients
 
 ## Append the netmask/cidr on to the subnet definition if not already given.
@@ -40,6 +46,7 @@ if not '/' in args['subnet']: args['subnet'] = f"{args['subnet']}/{args['netmask
 
 ## Convert arguments to workable elements:
 args['subnet'] = ipaddress.ip_network(args['subnet'])
+args['pxe_server'] = ipaddress.ip_address(args['pxe_server'])
 args['filter_clients'] = json.loads(args['filter_clients'])
 # Designate a gateway if none was given, take the first host of our subnet element:
 if not args['gateway']:
@@ -55,7 +62,9 @@ if not 'datastore' in __builtins__.__dict__:
 			'subnet' : args['subnet'],
 			'netmask' : args['netmask'],
 			'gateway' : args['gateway'],
-			'pxe' : args['pxe'], # Bootloader that supports HTTP chaining, will default to http://<gateway>:80/default.ipxe
+			#'pxe' : args['pxe'], # Bootloader that supports HTTP chaining, will default to http://<gateway>:80/default.ipxe
+			'pxe_server' : args['pxe_server'],
+			'pxe_bin' : args['pxe_bin'],
 			'pxe_dir' : args['pxe_dir'],
 			'*leases' : {
 				'<internal self reference>' : args['gateway']
@@ -213,7 +222,67 @@ class dhcp_option(abc.ABCMeta):
 		>>>
 		"""
 		# option | length | type
-		return binInt(53)+b'\x01'+struct.pack('B', dhcp_message_types[_type])   # Message Type ACK 
+		return binInt(53)+b'\x01'+struct.pack('B', dhcp_message_types[_type])   # Message Type ACK
+
+	@abc.abstractmethod
+	def dhcp_offer():
+		return b'\x02'
+
+	@abc.abstractmethod
+	def hardware_type(_type):
+		return b'\x01' # ethernet (only support :)
+
+	@abc.abstractmethod
+	def address_length(len):
+		return b'\x06'
+
+	@abc.abstractmethod
+	def trasnaction_id(request):
+		return request['transaction id']['bytes']
+
+	@abc.abstractmethod
+	def seconds_elapsed(t=0):
+		return struct.pack('>H', t)
+
+	@abc.abstractmethod
+	def bootp_flags():
+		return b'\x80\x00'
+
+	@abc.abstractmethod
+	def client_ip(request):
+		return b'\x00\x00\x00\x00'
+
+	@abc.abstractmethod
+	def offered_ip(addr):
+		return ip_to_bytes(addr)
+
+	@abc.abstractmethod
+	def next_server(addr):
+		return ip_to_bytes(addr)
+
+	@abc.abstractmethod
+	def relay_agent(addr='0.0.0.0'):
+		return ip_to_bytes(addr) # Relay agent IP address: 0.0.0.0 because I have no idea what this is heh
+
+	@abc.abstractmethod
+	def client_mac(request):
+		return request['client mac']['bytes']
+
+	@abc.abstractmethod
+	def client_addr_padding():
+		return b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'   # Client hardware address padding: (Legacy stuff)
+
+	@abc.abstractmethod
+	def server_host_name(request):
+		return b'\x00' * 64  # Server host name not supplied, so Zero this out
+
+	@abc.abstractmethod
+	def magic_cookie():
+		return b'\x63\x82\x53\x63'
+
+	@abc.abstractmethod
+	def hops(n=0):
+		return struct.pack('B', n)
 
 	@abc.abstractmethod
 	def identifier(addr):
@@ -266,6 +335,26 @@ class dhcp_option(abc.ABCMeta):
 		for server in servers:
 			result += int_array_to_hexbytes(ip_to_int(server))
 		return result
+
+	@abc.abstractmethod
+	def tftp_server_name(addr):
+		addr = int_array_to_hexbytes(ip_to_int(addr))
+		len_of_addr = struct.pack('B', len(addr)+1)
+		return binInt(66)+len_of_addr+addr+b'\0' # TFTP Server Name (IP valid)
+
+	@abc.abstractmethod
+	def boot_file(filename):
+		filename = bytes(filename, 'UTF-8')
+		filename_length = struct.pack('B', len(filename)+1)
+		return binInt(67)+filename_length+filename+b'\0' # Bootfile name
+
+	@abc.abstractmethod
+	def boot_file_prefix(_dir):
+		return binInt(210)+struct.pack('B', len(_dir))+bytes(_dir, 'UTF-8') # PXE Path Prefix
+
+	@abc.abstractmethod
+	def boot_file_configuration(path):
+		return binInt(209)+struct.pack('B', len(path))+bytes(path, 'UTF-8') # PXE Configuration file
 
 	@abc.abstractmethod
 	def router(addr):
@@ -343,88 +432,81 @@ class dhcp_serve():
 		if self.poll():
 			data, addr = self.sock.recvfrom(8192) # Could potentially lower tihs value, not sure if that would gain anything tho.
 
-			## Convert the 
+			## Convert and slot the data into the binary map representation
 			binary = list(byte_to_bin(data, bin_map=dhcp_packet_struct))
 
+			## Convert the binary representation into the protocol map
 			request = {}
 			for index in range(len(binary)):
 				request[dhcp_protocol[index]] = {'binary' : binary[index], 'bytes' : bin_str_to_byte(binary[index]), 'hex' : None}
 				request[dhcp_protocol[index]]['hex'] = bytes_to_hex(request[dhcp_protocol[index]]['bytes'])
 
-			#for key, val in request.items():
-			#	print(key, val)
-			print(f'[+] Request from: {{"mac": "{human_mac(request["client mac"]["bytes"])}"}}')
+			print(f'[+] Packet from: {{"mac": "{human_mac(request["client mac"]["bytes"])}"}}')
 
 			if 'filter_clients' in args and args['filter_clients']:
 				if not human_mac(request["client mac"]["bytes"]) in args['filter_clients']:
 					print(f'[ ] Request ignored: {{"mac": "{human_mac(request["client mac"]["bytes"])}"}}')
 					return
 
-			## Extract the DHCP options
-			dhcp_options = request['other']['binary']
-			num_of_dhcp_options = ord(bin_str_to_byte([dhcp_options[1]]))
+			## Extract the DHCP options from the client
+			requests_dhcp_options = request['other']['binary']
+			num_of_dhcp_options = ord(bin_str_to_byte([requests_dhcp_options[1]]))
 			request['dhcp_options'] = {}
 
 			for item in range(num_of_dhcp_options):
-				request['dhcp_options'][item] = { 'binary' : dhcp_options[item],
-												  'bytes' : bin_str_to_byte([dhcp_options[item]])}
+				request['dhcp_options'][item] = { 'binary' : requests_dhcp_options[item],
+												  'bytes' : bin_str_to_byte([requests_dhcp_options[item]])}
 
-			## If the MAC (in bytes() format) isn't in the known list
-			## generate a new IP for that person. For now we don't have a cleanup period for this.
-			## (basic basic for now)
-			if not request['client mac']['hex'] in datastore['dhcp']['*leases']:
+			## Got all the parsing and processing done.
+			## Time ot build a response if the requested packet was DHCP request of some kind.
+			packet = b''
+			if request['msg type']['bytes'] == b'\x01': # Message type: Boot request (1)
+				if request['option 53']['bytes'][-1] == 1: # DHCP Discover
+					print(f'[ ] DHCP Discover from: {{"mac": "{human_mac(request["client mac"]["bytes"])}", "type" : "DHCP_DISCOVER"}}')
+				if request['option 53']['bytes'][-1] == 3: # DHCP Request
+					print(f'[ ] DHCP Request for IP from: {{"mac": "{human_mac(request["client mac"]["bytes"])}", "ip" : "<ignored>", "type" : "DHCP_REQUEST"}}')
+
+				## Check lease time for the specific mac
+				## If we don't find a lease, begin the "generate new IP process".
 				mac = human_mac(request["client mac"]["bytes"])
-
-				# The mac is filtered, and contains a IP
-				if args['filter_clients'] and mac in args['filter_clients'] and args['filter_clients'][mac].count('.'):
-					ip_leased = bytes(ip_to_int(args['filter_clients'][mac]))
-					print(f'[ ] Staticly giving: {{"ip" : "{human_readable(binToObj(ip_leased, int), ".")}", "to" : "{mac}"}}')
-				else:
-					if not (ip_leased := get_lease(mac)):
-						ip_leased = gen_ip(datastore['dhcp']['subnet'], datastore['dhcp']['*ip_uses'])
-						print(f'[ ] Dynamically giving: {{"ip" : "{ip_leased}", "to" : "{mac}"}}')
+				if not (leased_ip := get_lease(mac)):
+					# The mac is filtered, and contains a IP
+					if args['filter_clients'] and mac in args['filter_clients'] and args['filter_clients'][mac].count('.'):
+						leased_ip = bytes(ip_to_int(args['filter_clients'][mac]))
+						print(f'[ ] Staticly giving: {{"ip" : "{human_readable(binToObj(leased_ip, int), ".")}", "to" : "{mac}", "type" : "STATIC_DHCP_OFFER"}}')
+					else:
+						leased_ip = gen_ip(datastore['dhcp']['subnet'], datastore['dhcp']['*ip_uses'])
+						print(f'[ ] Dynamically giving: {{"ip" : "{leased_ip}", "to" : "{mac}", "type" : "DYNAMIC_DHCP_OFFER"}}')
 					
-						if ip_leased:
-							datastore['dhcp']['*leases'][mac] = ip_leased
-							datastore['dhcp']['*ip_uses'][ip_leased] = mac
+						if leased_ip:
+							datastore['dhcp']['*leases'][mac] = leased_ip
+							datastore['dhcp']['*ip_uses'][leased_ip] = mac
 						else:
 							raise ValueError('Out of IP addresses..') # TODO: make a clean "continue" / "check if old leases expired"
 
-			packet = b''
-			if request['msg type']['bytes'] == b'\x01': # Message type: Boot request (1)
-				mac = request["client mac"]["bytes"]
-				packet += b'\x02'   #Message type: DHCP Offer
-				packet += b'\x01'   #Hardware type: Ethernet
-				packet += b'\x06'   #Hardware address length: 6
-				packet += b'\x00'   #Hops: 0
-				packet += request['transaction id']['bytes']   #Transaction ID
-				packet += b'\x00\x00'  #Seconds elapsed: 0
-				packet += b'\x80\x00'   #Bootp flags: 0x8000 (Broadcast) + reserved flags
-				packet += b'\x00\x00\x00\x00'   # Client IP address: 0.0.0.0
-				packet += ip_to_bytes(datastore['dhcp']['*leases'][human_mac(mac)])   # The IP offered to the client
-				if datastore['dhcp']['pxe']:
-					## --pxe=192.168.0.1:pxe_boot.bin
-					if not ':' in datastore['dhcp']['pxe']:
-						# 192.168.0.1 -> b'\xac\x1+\r%'
-						packet += int_array_to_hexbytes(datastore['dhcp']['gateway'].split('.'))
-					else:
-						# 192.168.0.1:/path -> 192.168.0.1 -> b'\xac\x1+\r%'
-						packet += int_array_to_hexbytes(datastore['dhcp']['pxe'].split(':',1)[0].split('.'))
-				else:
-					packet += b'\x00\x00\x00\x00'   # "Next server", if not PXE, 0.0.0.0
-				packet += b'\x00\x00\x00\x00'   # Relay agent IP address: 0.0.0.0 because I have no idea what this is heh
-				packet += request['client mac']['bytes'] # Client MAC address: 00:26:9e:04:1e:9b
-				packet += b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'   # Client hardware address padding: (Legacy stuff)
-				packet += b'\x00' * 64  # Server host name not supplied, so Zero this out
-				packet += b'\x00' * 128 # Otherwise we zero it out
-				packet += b'\x63\x82\x53\x63' #b'\x63\x82\x53\x63'   #Magic cookie: DHCP
+				packet += dhcp_option.dhcp_offer() #Message type: DHCP Offer
+				packet += dhcp_option.hardware_type('ethernet')   #Hardware type: Ethernet
+				packet += dhcp_option.address_length(6)   #Hardware address length: 6
+				packet += dhcp_option.hops(0)   #Hops: 0
+				packet += dhcp_option.trasnaction_id(request)   #Transaction ID from the request
+				packet += dhcp_option.seconds_elapsed(0)  #Seconds elapsed: 0
+				packet += dhcp_option.bootp_flags()   #Bootp flags: 0x8000 (Broadcast) + reserved flags
+				packet += dhcp_option.client_ip(request)   # Client IP address: 0.0.0.0
+				packet += dhcp_option.offered_ip(leased_ip)   # The IP offered to the client
+				packet += dhcp_option.next_server(datastore['dhcp']['pxe_server'])
+				packet += dhcp_option.relay_agent(ipaddress.ip_address('0.0.0.0'))
+				packet += dhcp_option.client_mac(request) # Client MAC address: 00:26:9e:04:1e:9b
+				packet += dhcp_option.client_addr_padding()
+				packet += dhcp_option.server_host_name(request)
+				packet += b'\x00' * 128 # TODO: Unknown
+				packet += dhcp_option.magic_cookie()
 
 				## This is basically what differs in a basic basic DHCP sequence, the message type recieved and matching response.
 				if request['option 53']['bytes'][-1] == 1: # DHCP Discover
-					print(f'[-] Sending: {{"type" : "OFFER", "to" : "{human_mac(mac)}", "offering" : "{datastore["dhcp"]["*leases"][human_mac(mac)]}"}}')
-					packet += dhcp_iotion.TYPE('OFFER')
+					print(f'[-] Sending: {{"type" : "OFFER", "to" : "{mac}", "offering" : "{datastore["dhcp"]["*leases"][mac]}"}}')
+					packet += dhcp_option.TYPE('OFFER')
 				if request['option 53']['bytes'][-1] == 3: # DHCP Request
-					print(f'[-] Sending: {{"type" : "PROVIDED", "to" : "{human_mac(mac)}", "offering" : "{datastore["dhcp"]["*leases"][human_mac(mac)]}"}}')
+					print(f'[-] Sending: {{"type" : "PROVIDED", "to" : "{mac}", "offering" : "{datastore["dhcp"]["*leases"][mac]}"}}')
 					packet += dhcp_option.TYPE('ACK')
 					
 				packet += dhcp_option.identifier(datastore['dhcp']['gateway'])
@@ -439,11 +521,11 @@ class dhcp_serve():
 				packet += dhcp_option.dns_servers('8.8.8.8', '4.4.4.4')
 
 				## Begin PXE stuff:
-				if datastore['dhcp']['pxe']:
-					packet += binInt(66)+struct.pack('B', len(datastore['dhcp']['gateway'])+1)+bytes(datastore['dhcp']['gateway'], 'UTF-8')+b'\0' # TFTP Server Name (IP valid)
-					packet += binInt(67)+struct.pack('B', len(datastore['dhcp']['pxe'])+1)+bytes(datastore['dhcp']['pxe'], 'UTF-8')+b'\0' # Bootfile name
-					packet += binInt(210)+struct.pack('B', len('/arch/'))+bytes('/arch/', 'UTF-8') # PXE Path Prefix
-					packet += binInt(209)+struct.pack('B', len('loader/loader.conf'))+bytes('loader/loader.conf', 'UTF-8') # PXE Configuration file
+				if datastore['dhcp']['pxe_bin']:
+					packet += dhcp_option.tftp_server_name(datastore['dhcp']['gateway'])
+					packet += dhcp_option.boot_file(datastore['dhcp']['pxe_bin'])
+					packet += dhcp_option.boot_file_prefix(datastore['dhcp']['pxe_dir'])
+					packet += dhcp_option.boot_file_configuration(datastore['dhcp']['pxe_config'])
 
 				packet += b'\xff'   #End Option
 				#packet += b'\x00'*22 # Padding, not sure how much is needed atm but this does it :)
