@@ -1,4 +1,4 @@
-import sys, struct, json, abc, ipaddress #Python v3.3
+import sys, struct, json, abc, os, copy, ipaddress #Python v3.3
 from socket import *
 from select import epoll, EPOLLIN
 
@@ -33,6 +33,8 @@ if not 'netmask' in args: args['netmask'] = '255.255.255.0' # Optional, if it's 
 if not 'gateway' in args: args['gateway'] = None # Takes the first host of the subnet by default
 if not 'pxe_bin' in args: args['pxe_bin'] = None # Point toward a efi file, for instance: '/ipxe.efi'
 if not 'pxe_dir' in args: args['pxe_dir'] = './'# './pxe_files'
+if not 'cache_dir' in args: args['cache_dir'] = './'
+if not 'cache_db' in args: args['cache_db'] = None
 if not 'pxe_config' in args: args['pxe_config'] = 'loader/loader.conf'
 if not 'pxe_server' in args:
 	if args['pxe_bin']:
@@ -56,25 +58,123 @@ if not args['gateway']:
 
 ## Set up the global dictionary/config:
 if not 'datastore' in __builtins__.__dict__:
-	__builtins__.__dict__['datastore'] = {
-		'dhcp' : {
-			'interface' : args['interface'],
-			'subnet' : args['subnet'],
-			'netmask' : args['netmask'],
-			'gateway' : args['gateway'],
-			#'pxe' : args['pxe'], # Bootloader that supports HTTP chaining, will default to http://<gateway>:80/default.ipxe
-			'pxe_server' : args['pxe_server'],
-			'pxe_bin' : args['pxe_bin'],
-			'pxe_dir' : args['pxe_dir'],
-			'*leases' : {
-				'<internal self reference>' : args['gateway']
-			},  # MAC -> IP
-			'*ip_uses' : {
-				args['gateway'] : '<interface self reference>'
-			}, # IP -> MAC
-			'*address_space' : {}
-		}
+	__builtins__.__dict__['datastore'] = {'dhcp' : {}}
+	if args['cache_db'] and os.path.isfile(f"{args['cache_dir']}/{args['cache_db']}"):
+		with open(f"{args['cache_dir']}/{args['cache_db']}", 'r') as fh:
+			tmp = json.load(fh)
+			print(f'[-] Loaded cache: {{"type" : "cache", "loaded" : "{args["cache_dir"]}/{args["cache_db"]}"}}')
+
+		for key, val in tmp['dhcp'].items():
+			datastore['dhcp'][key] = val
+
+	if not 'interface' in datastore['dhcp']: datastore['dhcp']['interface'] = args['interface']
+	if not 'subnet' in datastore['dhcp']: datastore['dhcp']['subnet'] = args['subnet']
+	if not 'netmask' in datastore['dhcp']: datastore['dhcp']['netmask'] = args['netmask']
+	if not 'gateway' in datastore['dhcp']: datastore['dhcp']['gateway'] = args['gateway']
+	if not 'pxe_server' in datastore['dhcp']: datastore['dhcp']['pxe_server'] = args['pxe_server']
+	if not 'pxe_bin' in datastore['dhcp']: datastore['dhcp']['pxe_bin'] = args['pxe_bin']
+	if not 'pxe_dir' in datastore['dhcp']: datastore['dhcp']['pxe_dir'] = args['pxe_dir']
+	if not 'leases_by_mac' in datastore['dhcp']: datastore['dhcp']['leases_by_mac'] = {
+		'<internal self reference>' : args['gateway']
 	}
+	if not 'leases_by_ip' in datastore['dhcp']: datastore['dhcp']['leases_by_ip'] = {
+		args['gateway'] : '<internal self reference>'
+	}
+
+	for key in list(datastore['dhcp']['leases_by_ip'].keys()):
+		if key == '<internal self reference>': continue
+		if type(key) != ipaddress.IPv4Address:
+			datastore['dhcp']['leases_by_ip'][ipaddress.ip_address(key)] = datastore['dhcp']['leases_by_ip'][key]
+			del(datastore['dhcp']['leases_by_ip'][key])
+
+	for key, val in list(datastore['dhcp']['leases_by_mac'].items()):
+		if val == '<internal self reference>' or key == '<internal self reference>': continue
+		if type(val) != ipaddress.IPv4Address:
+			datastore['dhcp']['leases_by_mac'][key] = ipaddress.ip_address(datastore['dhcp']['leases_by_mac'][key])
+
+	if type(datastore['dhcp']['gateway']) != ipaddress.IPv4Address:
+		datastore['dhcp']['gateway'] = ipaddress.ip_address(datastore['dhcp']['gateway'])
+
+	if type(datastore['dhcp']['subnet']) != ipaddress.IPv4Address:
+		datastore['dhcp']['subnet'] = ipaddress.ip_network(datastore['dhcp']['subnet'])
+
+	if type(datastore['dhcp']['pxe_server']) != ipaddress.IPv4Address:
+		datastore['dhcp']['pxe_server'] = ipaddress.ip_address(datastore['dhcp']['pxe_server'])
+
+"""
+def json_serial(obj):
+	#if isinstance(obj, (datetime, date)):
+	#	return obj.isoformat()
+	if isinstance(obj, ipaddress.IPv4Network):
+		return str(obj)
+	elif isinstance(obj, ipaddress.IPv4Address):
+		return str(obj)
+	elif type(obj) is bytes:
+		return obj.decode('UTF-8')
+	elif getattr(obj, "__dump__", None): #hasattr(obj, '__dump__'):
+		return obj.__dump__()
+	else:
+		return str(obj)
+
+	raise TypeError('Type {} is not serializable: {}'.format(type(obj), obj))
+"""
+
+class JSON_Typer(json.JSONEncoder):
+	def _encode(self, obj):
+		## Workaround to handle keys in the dictionary being bytes() objects etc.
+		## Also handles recursive JSON encoding. In case sub-keys are bytes/date etc.
+		##
+		## README: If you're wondering why we're doing loads(dumps(x)) instad of just dumps(x)
+		##         that's because it would become a escaped string unless we loads() it back as
+		##         a regular object - before getting passed to the super(JSONEncoder) which will
+		##         do the actual JSON encoding as it's last step. All this shananigans are just
+		##         to recursively handle different data types within a nested dict/list/X struct.
+		if isinstance(obj, dict):
+			def check_key(o):
+				if type(o) == bytes:
+					o = o.decode('UTF-8', errors='replace')
+				elif type(o) == set:
+					o = json.loads(json.dumps(o, cls=JSON_Typer))
+				elif isinstance(o, ipaddress.IPv4Address):
+					return str(o)
+				elif isinstance(o, ipaddress.IPv4Network):
+					return str(o)
+				elif getattr(o, "__dump__", None): #hasattr(obj, '__dump__'):
+					return o.__dump__()
+				return o
+			## We'll need to iterate not just the value that default() usually gets passed
+			## But also iterate manually over each key: value pair in order to trap the keys.
+			
+			for key, val in list(obj.items()):
+				if isinstance(val, dict):
+					val = json.loads(json.dumps(val, cls=JSON_Typer)) # This, is a EXTREMELY ugly hack..
+                                                            # But it's the only quick way I can think of to 
+                                                            # trigger a encoding of sub-dictionaries. (I'm also very tired, yolo!)
+				else:
+					val = check_key(val)
+				del(obj[key])
+				obj[check_key(key)] = val
+			return obj
+		elif isinstance(obj, ipaddress.IPv4Address):
+			return str(obj)
+		elif isinstance(obj, ipaddress.IPv4Network):
+			return str(obj)
+		elif getattr(obj, "__dump__", None): #hasattr(obj, '__dump__'):
+			return obj.__dump__()
+		elif isinstance(obj, (datetime, date)):
+			return obj.isoformat()
+		elif isinstance(obj, (custom_class, custom_class_two)):
+			return json.loads(json.dumps(obj.dump(), cls=JSON_Typer))
+		elif isinstance(obj, (list, set, tuple)):
+			r = []
+			for item in obj:
+				r.append(json.loads(json.dumps(item, cls=JSON_Typer)))
+			return r
+		else:
+			return obj
+
+	def encode(self, obj):
+		return super(JSON_Typer, self).encode(self._encode(obj))
 
 def byte_to_bin(bs, bin_map=None):
 	"""
@@ -190,8 +290,8 @@ def ip_to_bytes(ip_obj):
 	return struct.pack('>I', int(ip_obj))
 
 def get_lease(mac):
-	if mac in datastore['dhcp']['*leases']:
-		return datastore['dhcp']['*leases'][mac]
+	if mac in datastore['dhcp']['leases_by_mac']:
+		return datastore['dhcp']['leases_by_mac'][mac]
 	else:
 		return None
 
@@ -472,17 +572,19 @@ class dhcp_serve():
 				if not (leased_ip := get_lease(mac)):
 					# The mac is filtered, and contains a IP
 					if args['filter_clients'] and mac in args['filter_clients'] and args['filter_clients'][mac].count('.'):
-						leased_ip = bytes(ip_to_int(args['filter_clients'][mac]))
-						print(f'[ ] Staticly giving: {{"ip" : "{human_readable(binToObj(leased_ip, int), ".")}", "to" : "{mac}", "type" : "STATIC_DHCP_OFFER"}}')
+						leased_ip = ipaddress.ip_address(args['filter_clients'][mac])
+						print(f'[ ] Staticly giving: {{"ip" : "{leased_ip}", "to" : "{mac}", "type" : "STATIC_DHCP_OFFER"}}')
 					else:
-						leased_ip = gen_ip(datastore['dhcp']['subnet'], datastore['dhcp']['*ip_uses'])
+						leased_ip = gen_ip(datastore['dhcp']['subnet'], datastore['dhcp']['leases_by_ip'])
 						print(f'[ ] Dynamically giving: {{"ip" : "{leased_ip}", "to" : "{mac}", "type" : "DYNAMIC_DHCP_OFFER"}}')
 					
-						if leased_ip:
-							datastore['dhcp']['*leases'][mac] = leased_ip
-							datastore['dhcp']['*ip_uses'][leased_ip] = mac
-						else:
-							raise ValueError('Out of IP addresses..') # TODO: make a clean "continue" / "check if old leases expired"
+					if leased_ip:
+						datastore['dhcp']['leases_by_mac'][mac] = leased_ip
+						datastore['dhcp']['leases_by_ip'][leased_ip] = mac
+					else:
+						raise ValueError('Out of IP addresses..') # TODO: make a clean "continue" / "check if old leases expired"
+				else:
+					print(f'[ ] Giving cached: {{"ip" : "{leased_ip}", "to" : "{mac}", "type" : "CACHED_DHCP_OFFER"}}')
 
 				packet += dhcp_option.dhcp_offer() #Message type: DHCP Offer
 				packet += dhcp_option.hardware_type('ethernet')   #Hardware type: Ethernet
@@ -503,10 +605,10 @@ class dhcp_serve():
 
 				## This is basically what differs in a basic basic DHCP sequence, the message type recieved and matching response.
 				if request['option 53']['bytes'][-1] == 1: # DHCP Discover
-					print(f'[-] Sending: {{"type" : "OFFER", "to" : "{mac}", "offering" : "{datastore["dhcp"]["*leases"][mac]}"}}')
+					print(f'[-] Sending: {{"type" : "OFFER", "to" : "{mac}", "offering" : "{datastore["dhcp"]["leases_by_mac"][mac]}"}}')
 					packet += dhcp_option.TYPE('OFFER')
 				if request['option 53']['bytes'][-1] == 3: # DHCP Request
-					print(f'[-] Sending: {{"type" : "PROVIDED", "to" : "{mac}", "offering" : "{datastore["dhcp"]["*leases"][mac]}"}}')
+					print(f'[-] Sending: {{"type" : "PROVIDED", "to" : "{mac}", "offering" : "{datastore["dhcp"]["leases_by_mac"][mac]}"}}')
 					packet += dhcp_option.TYPE('ACK')
 					
 				packet += dhcp_option.identifier(datastore['dhcp']['gateway'])
@@ -532,6 +634,11 @@ class dhcp_serve():
 
 			if len(packet) > 0:
 				self.sock.sendto(packet, ('255.255.255.255', 68))
+
+				if args['cache_db']:
+					with open(f"{args['cache_dir']}/{args['cache_db']}", 'w') as fh:
+						datastore_snapshot = copy.deepcopy(datastore)
+						fh.write(json.dumps(datastore_snapshot, indent=4, cls=JSON_Typer))
 
 if __name__ == '__main__':
 	pxe = dhcp_serve()
