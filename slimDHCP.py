@@ -653,7 +653,10 @@ if __name__ == '__main__':
 			args['pxe_server'] = '0.0.0.0'
 	if not 'filter_clients' in args: args['filter_clients'] = '{}' # JSON structure of clients
 
+
 	## Convert arguments to workable elements:
+	if type(args['dns_servers']) == str:
+		args['dns_servers'] = json.loads(args['dns_servers'])
 	if type(args['subnet']) == str:
 		## Append the netmask/cidr on to the subnet definition if not already given.
 		if not '/' in args['subnet']: args['subnet'] = f"{args['subnet']}/{args['netmask']}"
