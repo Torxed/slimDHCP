@@ -1,123 +1,6 @@
-import sys, struct, json, abc, os, copy, ipaddress #Python v3.3
+import sys, struct, json, abc, os, copy, signal, ipaddress #Python v3.3
 from socket import *
 from select import epoll, EPOLLIN
-
-## Basic version of arg.parse() supporting:
-## * --key=value
-## * slimDHCP.py positional1 positional2
-args = {}
-positionals = []
-for arg in sys.argv[1:]:
-	if '--' == arg[:2]:
-		if '=' in arg:
-			key, val = [x.strip() for x in arg[2:].split('=')]
-		else:
-			key, val = arg[2:], True
-		args[key] = val
-	else:
-		positionals.append(arg)
-
-if not 'interface' in args:
-	print('\n  [!] Mandatory: --interface=<ifname>') #args['interface'] = 'ens4u1u4'
-	print()
-	print('Usage: ')
-	print(' --interface=eth0          (mandatory)')
-	print(' --subnet=192.168.1.0/24   (default)')
-	print(' --gateway=192.168.1.1     (default)')
-	print(' --pxe_bin=ipxe.efi')
-	print(' --pxe_dir=/srv/pxe/')
-	print(' --filter_clients=\'{"de:ad:be:ef:00:01" : true, "de:ad:be:ef:00:02" : "192.168.1.10"}\'')
-	exit(1)
-if not 'subnet' in args: args['subnet'] = '192.168.1.0'
-if not 'netmask' in args: args['netmask'] = '255.255.255.0' # Optional, if it's given on the subnet definition.
-if not 'gateway' in args: args['gateway'] = None # Takes the first host of the subnet by default
-if not 'pxe_bin' in args: args['pxe_bin'] = None # Point toward a efi file, for instance: '/ipxe.efi'
-if not 'pxe_dir' in args: args['pxe_dir'] = './'# './pxe_files'
-if not 'cache_dir' in args: args['cache_dir'] = './'
-if not 'cache_db' in args: args['cache_db'] = None
-if not 'pxe_config' in args: args['pxe_config'] = 'loader/loader.conf'
-if not 'pxe_server' in args:
-	if args['pxe_bin']:
-		args['pxe_server'] = args['gateway']
-	else:
-		args['pxe_server'] = '0.0.0.0'
-if not 'filter_clients' in args: args['filter_clients'] = '{}' # JSON structure of clients
-
-## Append the netmask/cidr on to the subnet definition if not already given.
-if not '/' in args['subnet']: args['subnet'] = f"{args['subnet']}/{args['netmask']}"
-
-## Convert arguments to workable elements:
-args['subnet'] = ipaddress.ip_network(args['subnet'])
-args['pxe_server'] = ipaddress.ip_address(args['pxe_server'])
-args['filter_clients'] = json.loads(args['filter_clients'])
-# Designate a gateway if none was given, take the first host of our subnet element:
-if not args['gateway']:
-	for host in args['subnet'].hosts():
-		args['gateway'] = host
-		break
-
-## Set up the global dictionary/config:
-if not 'datastore' in __builtins__.__dict__:
-	__builtins__.__dict__['datastore'] = {'dhcp' : {}}
-	if args['cache_db'] and os.path.isfile(f"{args['cache_dir']}/{args['cache_db']}"):
-		with open(f"{args['cache_dir']}/{args['cache_db']}", 'r') as fh:
-			tmp = json.load(fh)
-			print(f'[-] Loaded cache: {{"type" : "cache", "loaded" : "{args["cache_dir"]}/{args["cache_db"]}"}}')
-
-		for key, val in tmp['dhcp'].items():
-			datastore['dhcp'][key] = val
-
-	if not 'interface' in datastore['dhcp']: datastore['dhcp']['interface'] = args['interface']
-	if not 'subnet' in datastore['dhcp']: datastore['dhcp']['subnet'] = args['subnet']
-	if not 'netmask' in datastore['dhcp']: datastore['dhcp']['netmask'] = args['netmask']
-	if not 'gateway' in datastore['dhcp']: datastore['dhcp']['gateway'] = args['gateway']
-	if not 'pxe_server' in datastore['dhcp']: datastore['dhcp']['pxe_server'] = args['pxe_server']
-	if not 'pxe_bin' in datastore['dhcp']: datastore['dhcp']['pxe_bin'] = args['pxe_bin']
-	if not 'pxe_dir' in datastore['dhcp']: datastore['dhcp']['pxe_dir'] = args['pxe_dir']
-	if not 'leases_by_mac' in datastore['dhcp']: datastore['dhcp']['leases_by_mac'] = {
-		'<internal self reference>' : args['gateway']
-	}
-	if not 'leases_by_ip' in datastore['dhcp']: datastore['dhcp']['leases_by_ip'] = {
-		args['gateway'] : '<internal self reference>'
-	}
-
-	for key in list(datastore['dhcp']['leases_by_ip'].keys()):
-		if key == '<internal self reference>': continue
-		if type(key) != ipaddress.IPv4Address:
-			datastore['dhcp']['leases_by_ip'][ipaddress.ip_address(key)] = datastore['dhcp']['leases_by_ip'][key]
-			del(datastore['dhcp']['leases_by_ip'][key])
-
-	for key, val in list(datastore['dhcp']['leases_by_mac'].items()):
-		if val == '<internal self reference>' or key == '<internal self reference>': continue
-		if type(val) != ipaddress.IPv4Address:
-			datastore['dhcp']['leases_by_mac'][key] = ipaddress.ip_address(datastore['dhcp']['leases_by_mac'][key])
-
-	if type(datastore['dhcp']['gateway']) != ipaddress.IPv4Address:
-		datastore['dhcp']['gateway'] = ipaddress.ip_address(datastore['dhcp']['gateway'])
-
-	if type(datastore['dhcp']['subnet']) != ipaddress.IPv4Address:
-		datastore['dhcp']['subnet'] = ipaddress.ip_network(datastore['dhcp']['subnet'])
-
-	if type(datastore['dhcp']['pxe_server']) != ipaddress.IPv4Address:
-		datastore['dhcp']['pxe_server'] = ipaddress.ip_address(datastore['dhcp']['pxe_server'])
-
-"""
-def json_serial(obj):
-	#if isinstance(obj, (datetime, date)):
-	#	return obj.isoformat()
-	if isinstance(obj, ipaddress.IPv4Network):
-		return str(obj)
-	elif isinstance(obj, ipaddress.IPv4Address):
-		return str(obj)
-	elif type(obj) is bytes:
-		return obj.decode('UTF-8')
-	elif getattr(obj, "__dump__", None): #hasattr(obj, '__dump__'):
-		return obj.__dump__()
-	else:
-		return str(obj)
-
-	raise TypeError('Type {} is not serializable: {}'.format(type(obj), obj))
-"""
 
 class JSON_Typer(json.JSONEncoder):
 	def _encode(self, obj):
@@ -289,11 +172,39 @@ def human_readable(l, separator):
 def ip_to_bytes(ip_obj):
 	return struct.pack('>I', int(ip_obj))
 
-def get_lease(mac):
-	if mac in datastore['dhcp']['leases_by_mac']:
-		return datastore['dhcp']['leases_by_mac'][mac]
-	else:
-		return None
+def save_local_storage(filename, storage):
+	with open(filename, 'w') as fh:
+		datastore_snapshot = copy.deepcopy(storage)
+		fh.write(json.dumps(datastore_snapshot, indent=4, cls=JSON_Typer))
+
+def load_local_storage(filename):
+	if not filename or not os.path.isfile(filename): return {}
+
+	with open(filename, 'r') as fh:
+		storage = json.load(fh)
+		print(f'[-] Loaded cache: {{"type" : "cache", "loaded" : "{args["cache_dir"]}/{args["cache_db"]}"}}')
+
+	for key in list(storage['leases_by_ip'].keys()):
+		if key == '<internal self reference>': continue
+		if type(key) != ipaddress.IPv4Address:
+			storage['leases_by_ip'][ipaddress.ip_address(key)] = storage['leases_by_ip'][key]
+			del(storage['leases_by_ip'][key])
+
+	for key, val in list(storage['leases_by_mac'].items()):
+		if val == '<internal self reference>' or key == '<internal self reference>': continue
+		if type(val) != ipaddress.IPv4Address:
+			storage['leases_by_mac'][key] = ipaddress.ip_address(storage['leases_by_mac'][key])
+
+	if type(storage['gateway']) != ipaddress.IPv4Address:
+		storage['gateway'] = ipaddress.ip_address(storage['gateway'])
+
+	if type(storage['subnet']) != ipaddress.IPv4Address:
+		storage['subnet'] = ipaddress.ip_network(storage['subnet'])
+
+	if type(storage['pxe_server']) != ipaddress.IPv4Address:
+		storage['pxe_server'] = ipaddress.ip_address(storage['pxe_server'])
+
+	return storage
 
 class dhcp_option(abc.ABCMeta):
 	"""
@@ -500,25 +411,44 @@ class dhcp_option(abc.ABCMeta):
 		return binInt(59)+struct.pack('B', len(rt))+rt # Rebinding Time Value
 
 class dhcp_serve():
-	def __init__(self, interface=None):
-		if not interface:
-			if 'interface' in datastore['dhcp'] and datastore['dhcp']['interface']:
-				interface = datastore['dhcp']['interface']
-			else:
-				interface = sorted([x for x in psutil.net_if_addrs().keys() if not x == 'lo'])[0]
-		self.sock = socket(AF_INET, SOCK_DGRAM) # UDP
+	def __init__(self, *args, **kwargs):
+		if not 'interface' in kwargs:
+			raise KeyError('dhcp_server() requires at least a interface=X to be given.')
+
+		## Update our self.variable = value references.
+		for var, val in kwargs.items():
+			self.__dict__[var] = val
+
+		## Cache variables:
+		self.leases_by_mac = {}
+		self.leases_by_ip = {}
+
+		with open(f'/sys/class/net/{self.interface}/address', 'r') as fh:
+			self.mac = fh.read().strip()
+
+		if self.is_gateway:
+			print(f'[-] We are the gateway: {{"gateway" : "{self.gateway}", "mac" : "{self.mac}"}}')
+			self.leases_by_ip[self.gateway] = self.mac
+			self.leases_by_mac[self.mac] = self.gateway
+		else:
+			print(f'[-] Gateway MAC unknown: {{"gateway" : "{self.gateway}", "mac" : "unknown"}}')
+			self.leases_by_ip[self.gateway] = '00:00:00:00:00:00'
+			self.leases_by_mac['00:00:00:00:00:00'] = self.gateway
+				
+		self.socket = socket(AF_INET, SOCK_DGRAM) # UDP
 
 		## https://www.freepascal.org/docs-html/current/rtl/sockets/index-2.html
-		self.sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-		self.sock.setsockopt(SOL_SOCKET, SO_BROADCAST, 1)
+		self.socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+		self.socket.setsockopt(SOL_SOCKET, SO_BROADCAST, 1)
 		## Not sure we need this:
-		self.sock.setsockopt(SOL_SOCKET, 25, bytes(interface, 'UTF-8')+b'\0') ## http://fxr.watson.org/fxr/source/net/wanrouter/af_wanpipe.c?v=linux-2.6
-		self.sock.bind(('255.255.255.255', 67)) # And lets listen on port 67 broadcasts (UDP)
-		self.main_so_id = self.sock.fileno()
-		print(f'[-] Bound to: {{"interface" : "{interface}", "address" : "255.255.255.255", "port" : 67}}')
+		self.socket.setsockopt(SOL_SOCKET, 25, bytes(kwargs['interface'], 'UTF-8')+b'\0') ## http://fxr.watson.org/fxr/source/net/wanrouter/af_wanpipe.c?v=linux-2.6
+		self.socket.bind(('255.255.255.255', 67)) # And lets listen on port 67 broadcasts (UDP)
+		self.main_so_id = self.socket.fileno()
+		print(f'[-] Bound to: {{"interface" : "{kwargs["interface"]}", "address" : "255.255.255.255", "port" : 67}}')
 
 		self.pollobj = epoll()
 		self.pollobj.register(self.main_so_id, EPOLLIN)
+
 
 	def poll(self, timeout=0.001, fileno=None):
 		d = dict(self.pollobj.poll(timeout))
@@ -527,7 +457,13 @@ class dhcp_serve():
 
 	def close(self):
 		self.pollobj.unregister(self.main_so_id)
-		self.sock.close()
+		self.socket.close()
+
+	def get_lease(self, mac):
+		if mac in self.leases_by_mac:
+			return self.leases_by_mac[mac]
+		else:
+			return None
 
 	def parse(self):
 		# The struct just maps how many bytes (not bits) per section in a DHCP request.
@@ -550,7 +486,7 @@ class dhcp_serve():
 						 'other']
 
 		if self.poll():
-			data, addr = self.sock.recvfrom(8192) # Could potentially lower tihs value, not sure if that would gain anything tho.
+			data, addr = self.socket.recvfrom(8192) # Could potentially lower tihs value, not sure if that would gain anything tho.
 
 			## Convert and slot the data into the binary map representation
 			binary = list(byte_to_bin(data, bin_map=dhcp_packet_struct))
@@ -590,19 +526,19 @@ class dhcp_serve():
 				## Check lease time for the specific mac
 				## If we don't find a lease, begin the "generate new IP process".
 				mac = human_mac(request["client mac"]["bytes"])
-				if not (leased_ip := get_lease(mac)):
+				if not (leased_ip := self.get_lease(mac)):
 					# The mac is filtered, and contains a static IP lease definition
 					if args['filter_clients'] and mac in args['filter_clients'] and args['filter_clients'][mac].count('.'):
 						leased_ip = ipaddress.ip_address(args['filter_clients'][mac])
 						print(f'[ ] Staticly giving: {{"ip" : "{leased_ip}", "to" : "{mac}", "type" : "STATIC_DHCP_OFFER"}}')
 					# Otherwise, generate a IP from the total pool of available IP's
 					else:
-						leased_ip = gen_ip(datastore['dhcp']['subnet'], datastore['dhcp']['leases_by_ip'])
+						leased_ip = gen_ip(self.subnet, self.leases_by_ip)
 						print(f'[ ] Dynamically giving: {{"ip" : "{leased_ip}", "to" : "{mac}", "type" : "DYNAMIC_DHCP_OFFER"}}')
 					
 					if leased_ip:
-						datastore['dhcp']['leases_by_mac'][mac] = leased_ip
-						datastore['dhcp']['leases_by_ip'][leased_ip] = mac
+						self.leases_by_mac[mac] = leased_ip
+						self.leases_by_ip[leased_ip] = mac
 					else:
 						raise ValueError('TODO: Out of IP addresses..') # TODO: make a clean "continue" / "check if old leases expired"
 				# There was a pre-existing lease, using that lease:
@@ -618,7 +554,7 @@ class dhcp_serve():
 				packet += dhcp_option.bootp_flags()
 				packet += dhcp_option.client_ip(request)
 				packet += dhcp_option.offered_ip(leased_ip)
-				packet += dhcp_option.next_server(datastore['dhcp']['pxe_server']) # 0.0.0.0 == None
+				packet += dhcp_option.next_server(self.pxe_server) # 0.0.0.0 == None
 				packet += dhcp_option.relay_agent(ipaddress.ip_address('0.0.0.0'))
 				packet += dhcp_option.client_mac(request)
 				packet += dhcp_option.client_addr_padding()
@@ -629,15 +565,15 @@ class dhcp_serve():
 				## This is basically what differs in a basic basic DHCP sequence,
 				## the message type recieved and matching response. At least for a basic IP request/handshake.
 				if request['option 53']['bytes'][-1] == 1: # DHCP Discover
-					print(f'[-] Sending: {{"type" : "OFFER", "to" : "{mac}", "offering" : "{datastore["dhcp"]["leases_by_mac"][mac]}"}}')
+					print(f'[-] Sending: {{"type" : "OFFER", "to" : "{mac}", "offering" : "{self.leases_by_mac[mac]}"}}')
 					packet += dhcp_option.TYPE('OFFER')
 				if request['option 53']['bytes'][-1] == 3: # DHCP Request
-					print(f'[-] Sending: {{"type" : "PROVIDED", "to" : "{mac}", "offering" : "{datastore["dhcp"]["leases_by_mac"][mac]}"}}')
+					print(f'[-] Sending: {{"type" : "PROVIDED", "to" : "{mac}", "offering" : "{self.leases_by_mac[mac]}"}}')
 					packet += dhcp_option.TYPE('ACK')
 				
 				# Slap on the clients trasnacation identifier so it knows
 				# we responded to the request and not some other request it made.	
-				packet += dhcp_option.identifier(datastore['dhcp']['gateway'])
+				packet += dhcp_option.identifier(self.gateway)
 				
 				# We don't honor these, so we're generous with them:
 				packet += dhcp_option.lease_time(43200)
@@ -645,30 +581,96 @@ class dhcp_serve():
 				packet += dhcp_option.rebind_time(37800)
 
 				# And the IP, subnet, router(gateway) and DNS information.
-				packet += dhcp_option.subnet(datastore['dhcp']['subnet'].netmask)
-				packet += dhcp_option.broadcast_addr(datastore['dhcp']['subnet'].broadcast_address)
-				packet += dhcp_option.router(datastore['dhcp']['gateway'])
-				packet += dhcp_option.dns_servers('8.8.8.8', '4.4.4.4')
+				packet += dhcp_option.subnet(self.subnet.netmask)
+				packet += dhcp_option.broadcast_addr(self.subnet.broadcast_address)
+				packet += dhcp_option.router(self.gateway)
+				packet += dhcp_option.dns_servers(*self.dns_servers)
 
 				# If we have a PXE binary to deliver, add the appropriate options to the request:
-				if datastore['dhcp']['pxe_bin']:
-					packet += dhcp_option.tftp_server_name(datastore['dhcp']['gateway'])
-					packet += dhcp_option.boot_file(datastore['dhcp']['pxe_bin'])
-					packet += dhcp_option.boot_file_prefix(datastore['dhcp']['pxe_dir'])
-					packet += dhcp_option.boot_file_configuration(datastore['dhcp']['pxe_config'])
+				if self.pxe_bin:
+					packet += dhcp_option.tftp_server_name(self.gateway)
+					packet += dhcp_option.boot_file(self.pxe_bin)
+					packet += dhcp_option.boot_file_prefix(self.pxe_dir)
+					packet += dhcp_option.boot_file_configuration(self.pxe_config)
 
 				packet += b'\xff'   #End Option
 
 			if len(packet) > 0:
-				self.sock.sendto(packet, ('255.255.255.255', 68))
+				self.socket.sendto(packet, ('255.255.255.255', 68))
 
-				if args['cache_db']:
-					with open(f"{args['cache_dir']}/{args['cache_db']}", 'w') as fh:
-						datastore_snapshot = copy.deepcopy(datastore)
-						fh.write(json.dumps(datastore_snapshot, indent=4, cls=JSON_Typer))
+				if self.cache_db:
+					save_local_storage(self.cache_dir + '/' + self.cache_db, {**self.__dict__, 'socket' : None, 'pollobj' : None})
 
 if __name__ == '__main__':
-	pxe = dhcp_serve()
+	def sig_handler(signal, frame):
+		dhcp.close()
+		exit(0)
+	signal.signal(signal.SIGINT, sig_handler)
+
+	## Basic version of arg.parse() supporting:
+	## * --key=value
+	## * slimDHCP.py positional1 positional2
+	args = {}
+	positionals = []
+	for arg in sys.argv[1:]:
+		if '--' == arg[:2]:
+			if '=' in arg:
+				key, val = [x.strip() for x in arg[2:].split('=')]
+			else:
+				key, val = arg[2:], True
+			args[key] = val
+		else:
+			positionals.append(arg)
+
+	if not 'interface' in args:
+		print('\n  [!] Mandatory: --interface=<ifname>') #args['interface'] = 'ens4u1u4'
+		print()
+		print('Usage: ')
+		print(' --interface=eth0          (mandatory)')
+		print(' --subnet=192.168.1.0/24   (default)')
+		print(' --gateway=192.168.1.1     (default)')
+		print(' --pxe_bin=ipxe.efi')
+		print(' --pxe_dir=/srv/pxe/')
+		print(' --filter_clients=\'{"de:ad:be:ef:00:01" : true, "de:ad:be:ef:00:02" : "192.168.1.10"}\'')
+		exit(1)
+	
+	if not 'cache_dir' in args: args['cache_dir'] = './'
+	if not 'cache_db' in args: args['cache_db'] = None
+	args = {**load_local_storage(f"{args['cache_dir']}/{args['cache_db']}"), **args}
+
+	if not 'subnet' in args: args['subnet'] = '192.168.1.0'
+	if not 'netmask' in args: args['netmask'] = '255.255.255.0' # Optional, if it's given on the subnet definition.
+	if not 'gateway' in args: args['gateway'] = None # Takes the first host of the subnet by default
+	if not 'is_gateway' in args: args['is_gateway'] = False
+	if not 'dns_servers' in args: args['dns_servers'] = ('8.8.8.8', '4.4.4.4')
+	if not 'pxe_bin' in args: args['pxe_bin'] = None # Point toward a efi file, for instance: '/ipxe.efi'
+	if not 'pxe_dir' in args: args['pxe_dir'] = './'# './pxe_files'
+	if not 'pxe_config' in args: args['pxe_config'] = 'loader/loader.conf'
+	if not 'pxe_server' in args:
+		if args['pxe_bin']:
+			args['pxe_server'] = args['gateway']
+		else:
+			args['pxe_server'] = '0.0.0.0'
+	if not 'filter_clients' in args: args['filter_clients'] = '{}' # JSON structure of clients
+
+	## Convert arguments to workable elements:
+	if type(args['subnet']) == str:
+		## Append the netmask/cidr on to the subnet definition if not already given.
+		if not '/' in args['subnet']: args['subnet'] = f"{args['subnet']}/{args['netmask']}"
+		args['subnet'] = ipaddress.ip_network(args['subnet'])
+	if type(args['pxe_server']) == str:
+		args['pxe_server'] = ipaddress.ip_address(args['pxe_server'])
+
+	if type(args['filter_clients']) == str:
+		args['filter_clients'] = json.loads(args['filter_clients'])
+
+	# Designate a gateway if none was given, take the first host of our subnet element:
+	if not args['gateway']:
+		for host in args['subnet'].hosts():
+			args['gateway'] = host
+			break
+
+	dhcp = dhcp_serve(**args)
 	while 1:
-		if pxe.poll():
-			pxe.parse()
+		if dhcp.poll():
+			dhcp.parse()
