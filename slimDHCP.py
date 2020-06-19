@@ -415,18 +415,18 @@ class dhcp_serve():
 		if not 'interface' in kwargs:
 			raise KeyError('dhcp_server() requires at least a interface=X to be given.')
 
-		## Update our self.variable = value references.
-		for var, val in kwargs.items():
-			self.__dict__[var] = val
-
 		## Cache variables:
 		self.leases_by_mac = {}
 		self.leases_by_ip = {}
 
+		## Update our self.variable = value references.
+		for var, val in kwargs.items():
+			self.__dict__[var] = val
+
 		with open(f'/sys/class/net/{self.interface}/address', 'r') as fh:
 			self.mac = fh.read().strip()
 
-		if self.is_gateway:
+		if self.is_gateway and self.mac not in self.leases_by_mac and self.gateway not in self.leases_by_ip:
 			print(f'[-] We are the gateway: {{"gateway" : "{self.gateway}", "mac" : "{self.mac}"}}')
 			self.leases_by_ip[self.gateway] = self.mac
 			self.leases_by_mac[self.mac] = self.gateway
