@@ -1,0 +1,30 @@
+{
+    "leases_by_mac": {
+        "ae:8f:e2:45:00:46": "192.168.0.1",
+        "b6:35:bb:ef:d1:7b": "192.168.0.2"
+    },
+    "leases_by_ip": {
+        "192.168.0.1": "ae:8f:e2:45:00:46",
+        "192.168.0.2": "b6:35:bb:ef:d1:7b"
+    },
+    "interface": "veth1",
+    "subnet": "192.168.0.0/24",
+    "gateway": "192.168.0.1",
+    "cache_dir": "./",
+    "cache_db": "dhcp_leases.json",
+    "is_gateway": true,
+    "netmask": "255.255.255.0",
+    "dns_servers": [
+        "8.8.8.8",
+        "4.4.4.4"
+    ],
+    "pxe_bin": null,
+    "pxe_dir": "./",
+    "pxe_config": "loader/loader.conf",
+    "pxe_server": "0.0.0.0",
+    "filter_clients": {},
+    "mac": "ae:8f:e2:45:00:46",
+    "socket": null,
+    "main_so_id": 3,
+    "pollobj": null
+}

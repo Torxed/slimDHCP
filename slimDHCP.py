@@ -120,6 +120,12 @@ def bytes_to_hex(b):
 		s += '{:02X}'.format(i) # Int -> HEX
 	return s
 
+def bytes_to_ip(b):
+	s = ''
+	for i in b:
+		s += '{:d}.'.format(i) # Int -> INT.
+	return ipaddress.ip_address(s[:-1])
+
 def binInt(num):
 	## TODO: Discard, probably not doing what i initially thought it did (results are similar, up to a certain number)
 	##   binInt(53), hexInt(53)  vs  binInt(255), hexInt(255) : <
@@ -157,7 +163,7 @@ def gen_ip(subnet, exludes=[]):
 	#	if not ip in exludes:
 	#		return ip
 	for host in subnet.hosts():
-		if not host in exludes:
+		if not str(host) in exludes:
 			return host
 
 def human_mac(obj):
@@ -277,7 +283,14 @@ class dhcp_option(abc.ABCMeta):
 		return b'\x80\x00'
 
 	@abc.abstractmethod
-	def client_ip(request): # 0.0.0.0 (We could honor it, but that's a TODO)
+	def client_ip(request, server_instance): # 0.0.0.0 (We could honor it, but that's a TODO)
+		if request['client ip']['bytes'] != b'\x00\x00\x00\x00':
+			print('Client is asking for IP:', [bytes_to_ip(request['client ip']['bytes'])], 'in leases', server_instance.leases_by_ip)
+			if (ip := bytes_to_ip(request['client ip']['bytes'])) in server_instance.leases_by_ip:
+				print('IP was in leases')
+				if (mac := human_mac(request['client mac']['bytes'])) in server_instance.leases_by_mac:
+					print(f"IP {ip} and MAC {mac} was identified as a previous lease: {server_instance.leases_by_mac[mac]}")
+					#if ip == server_instance.leases_by_mac[mac]:
 		return b'\x00\x00\x00\x00'
 
 	@abc.abstractmethod
@@ -434,7 +447,13 @@ class dhcp_serve():
 			print(f'[-] Gateway MAC unknown: {{"gateway" : "{self.gateway}", "mac" : "unknown"}}')
 			self.leases_by_ip[self.gateway] = '00:00:00:00:00:00'
 			self.leases_by_mac['00:00:00:00:00:00'] = self.gateway
-				
+
+		print(f"Initiated the server with leases: {self.leases_by_mac} and {self.leases_by_ip}")
+		
+		#dhcp_option.client_ip({'client ip' : {'bytes' : b'\xc0\xa8\x00\x01'}, 'client mac' : {'bytes' : b'\xb6\x35\xbb\xef\xd1\x7b'}}, self)
+		#dhcp_option.client_ip({'client ip' : {'bytes' : b'\xff\xff\x00\x00'}, 'client mac' : {'bytes' : b'\x00\x00\x00\x00\x00\x00'}}, self)
+		#exit(0)
+
 		self.socket = socket(AF_INET, SOCK_DGRAM) # UDP
 
 		## https://www.freepascal.org/docs-html/current/rtl/sockets/index-2.html
@@ -460,9 +479,12 @@ class dhcp_serve():
 		self.socket.close()
 
 	def get_lease(self, mac):
+		print(f"Checking {mac} in leases {self.leases_by_mac}")
 		if mac in self.leases_by_mac:
+			print(f"Found lease: {self.leases_by_mac[mac]}")
 			return self.leases_by_mac[mac]
 		else:
+			print('No existing lease!')
 			return None
 
 	def parse(self):
@@ -552,7 +574,7 @@ class dhcp_serve():
 				packet += dhcp_option.trasnaction_id(request)
 				packet += dhcp_option.seconds_elapsed(0)
 				packet += dhcp_option.bootp_flags()
-				packet += dhcp_option.client_ip(request)
+				packet += dhcp_option.client_ip(request, self)
 				packet += dhcp_option.offered_ip(leased_ip)
 				packet += dhcp_option.next_server(self.pxe_server) # 0.0.0.0 == None
 				packet += dhcp_option.relay_agent(ipaddress.ip_address('0.0.0.0'))
