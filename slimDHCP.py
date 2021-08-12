@@ -297,40 +297,6 @@ def ip_to_bytes(ip_obj):
 		ip_obj = ipaddress.ip_address(ip_obj)
 	return struct.pack('>I', int(ip_obj))
 
-def save_local_storage(filename, storage):
-	with open(filename, 'w') as fh:
-		datastore_snapshot = copy.deepcopy(storage)
-		fh.write(json.dumps(datastore_snapshot, indent=4, cls=JSON_Typer))
-
-def load_local_storage(filename):
-	if not filename or not os.path.isfile(filename): return {}
-
-	with open(filename, 'r') as fh:
-		storage = json.load(fh)
-		print(f'[-] Loaded cache: {{"type" : "cache", "loaded" : "{args["cache_dir"]}/{args["cache_db"]}"}}')
-
-	for key in list(storage['leases_by_ip'].keys()):
-		if key == '<internal self reference>': continue
-		if type(key) != ipaddress.IPv4Address:
-			storage['leases_by_ip'][ipaddress.ip_address(key)] = storage['leases_by_ip'][key]
-			del(storage['leases_by_ip'][key])
-
-	for key, val in list(storage['leases_by_mac'].items()):
-		if val == '<internal self reference>' or key == '<internal self reference>': continue
-		if type(val) != ipaddress.IPv4Address:
-			storage['leases_by_mac'][key] = ipaddress.ip_address(storage['leases_by_mac'][key])
-
-	if type(storage['gateway']) != ipaddress.IPv4Address:
-		storage['gateway'] = ipaddress.ip_address(storage['gateway'])
-
-	if type(storage['subnet']) != ipaddress.IPv4Address:
-		storage['subnet'] = ipaddress.ip_network(storage['subnet'])
-
-	if type(storage['pxe_server']) != ipaddress.IPv4Address:
-		storage['pxe_server'] = ipaddress.ip_address(storage['pxe_server'])
-
-	return storage
-
 class dhcp_option(abc.ABCMeta):
 	"""
 	This class abstracts the build process of using struct.pack() to
@@ -581,6 +547,20 @@ class Leases():
 			del(self.leases_by_ip[ip])
 			del(self.leases_by_mac[mac])
 
+	def save(self, path):
+		with open(path, 'w') as output:
+			output.write(json.dumps({
+				'leases_by_ip' : self.leases_by_ip,
+				'leases_by_mac' : self.leases_by_mac
+			}))
+
+	def load(self, path):
+		if os.path.isfile((path := os.path.abspath(path))):
+			with open(path, 'r') as fh:
+				data = json.load(fh)
+				self.leases_by_mac = data['leases_by_mac']
+				self.leases_by_ip = data['leases_by_ip']
+
 	@property
 	def available_ip(self):
 		for host in self.subnet.hosts():
@@ -814,11 +794,15 @@ class dhcp_serve():
 					self.socket.sendto(packet, (addr[0], 67))
 
 				if self.cache_db:
-					save_local_storage(self.cache_dir + '/' + self.cache_db, {**self.__dict__, 'socket' : None, 'pollobj' : None})
+					self.lease_db.save(self.cache_dir + '/' + self.cache_db)
+					#save_local_storage(self.cache_dir + '/' + self.cache_db, self.lease_db)
 
 if __name__ == '__main__':
+	instances = []
+
 	def sig_handler(signal, frame):
-		dhcp.close()
+		for instance in instances:
+			instance.close()
 		exit(0)
 	signal.signal(signal.SIGINT, sig_handler)
 
@@ -851,8 +835,6 @@ if __name__ == '__main__':
 	
 	if not 'cache_dir' in args: args['cache_dir'] = './'
 	if not 'cache_db' in args: args['cache_db'] = None
-	args = {**load_local_storage(f"{args['cache_dir']}/{args['cache_db']}"), **args}
-
 	if not 'subnet' in args: args['subnet'] = None
 	if not 'netmask' in args: args['netmask'] = '255.255.255.0' # Optional, if it's given on the subnet definition.
 	if not 'gateway' in args: args['gateway'] = None # Takes the first host of the subnet by default
@@ -863,11 +845,7 @@ if __name__ == '__main__':
 	if not 'pxe_config' in args: args['pxe_config'] = 'loader/loader.conf'
 	if not 'multi_bind' in args: args['multi_bind'] = True
 	if not 'valid_relays' in args: args['valid_relays'] = '{}'
-	if not 'pxe_server' in args:
-		if args['pxe_bin']:
-			args['pxe_server'] = args['gateway']
-		else:
-			args['pxe_server'] = '0.0.0.0'
+	if not 'pxe_server' in args: args['pxe_server'] = '0.0.0.0'
 	if not 'filter_clients' in args: args['filter_clients'] = '{}' # JSON structure of clients
 	args['valid_relays'] = json.loads(args['valid_relays'])
 
@@ -908,7 +886,9 @@ if __name__ == '__main__':
 			break
 
 	lease_database = Leases(args['subnet'])
-	instances = []
+	if args['cache_dir'] and args['cache_db']:
+		lease_database.load(f"{args['cache_dir']}/{args['cache_db']}")
+
 	if args['multi_bind']:
 		instances.append(dhcp_serve(lease_db=lease_database, bind_to=get_ip_address(args['interface']), **{**args, 'gateway' : get_ip_address(args['interface'])}))
 	instances.append(dhcp_serve(lease_db=lease_database, bind_to='255.255.255.255', **args))
