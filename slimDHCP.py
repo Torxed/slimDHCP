@@ -679,12 +679,13 @@ class dhcp_serve():
 			# Build the remaining DHCP options by checking type, length and structuring data.
 			pos = 0
 			request['dhcp_options'] = {}
-			while pos < len(data) <= 312:
+			while pos < len(data) and pos <= 312:
 				option = request['options']['bytes'][pos]
 				if option == 255: # End
 					break
 				length = request['options']['bytes'][pos+1]
 				if pos + 2 + length > len(data):
+					# out of bounds check
 					break
 				data = request['options']['bytes'][pos+2:pos+2+length]
 				pos += 2 + length
