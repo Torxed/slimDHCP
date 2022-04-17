@@ -4,11 +4,6 @@
 import sys, struct, json, abc, os, copy, signal
 import socket, fcntl
 from select import epoll, EPOLLIN
-#from ctypes import (
-#	Structure, Union, POINTER, 
-#	pointer, get_errno, cast,
-#	c_ushort, c_byte, c_void_p, c_char_p, c_uint, c_int, c_uint16, c_uint32
-#)
 import ctypes.util
 import ctypes
 import pydantic
@@ -25,63 +20,6 @@ from typing import Optional, Dict, Union, List, Tuple, Any, Type
 ETH_P_ALL = 0x0003
 SOL_PACKET = 263
 PACKET_AUXDATA = 8
-
-class JSON_Typer(json.JSONEncoder):
-	def _encode(self, obj):
-		## Workaround to handle keys in the dictionary being bytes() objects etc.
-		## Also handles recursive JSON encoding. In case sub-keys are bytes/date etc.
-		##
-		## README: If you're wondering why we're doing loads(dumps(x)) instad of just dumps(x)
-		##         that's because it would become a escaped string unless we loads() it back as
-		##         a regular object - before getting passed to the super(JSONEncoder) which will
-		##         do the actual JSON encoding as it's last step. All this shananigans are just
-		##         to recursively handle different data types within a nested dict/list/X struct.
-		if isinstance(obj, dict):
-			def check_key(o):
-				if type(o) == bytes:
-					o = o.decode('UTF-8', errors='replace')
-				elif type(o) == set:
-					o = json.loads(json.dumps(o, cls=JSON_Typer))
-				elif isinstance(o, ipaddress.IPv4Address):
-					return str(o)
-				elif isinstance(o, ipaddress.IPv4Network):
-					return str(o)
-				elif getattr(o, "__dump__", None): #hasattr(obj, '__dump__'):
-					return o.__dump__()
-				return o
-			## We'll need to iterate not just the value that default() usually gets passed
-			## But also iterate manually over each key: value pair in order to trap the keys.
-			
-			for key, val in list(obj.items()):
-				if isinstance(val, dict):
-					val = json.loads(json.dumps(val, cls=JSON_Typer)) # This, is a EXTREMELY ugly hack..
-															# But it's the only quick way I can think of to 
-															# trigger a encoding of sub-dictionaries. (I'm also very tired, yolo!)
-				else:
-					val = check_key(val)
-				del(obj[key])
-				obj[check_key(key)] = val
-			return obj
-		elif isinstance(obj, ipaddress.IPv4Address):
-			return str(obj)
-		elif isinstance(obj, ipaddress.IPv4Network):
-			return str(obj)
-		elif getattr(obj, "__dump__", None): #hasattr(obj, '__dump__'):
-			return obj.__dump__()
-		elif isinstance(obj, (datetime, date)):
-			return obj.isoformat()
-		elif isinstance(obj, (custom_class, custom_class_two)):
-			return json.loads(json.dumps(obj.dump(), cls=JSON_Typer))
-		elif isinstance(obj, (list, set, tuple)):
-			r = []
-			for item in obj:
-				r.append(json.loads(json.dumps(item, cls=JSON_Typer)))
-			return r
-		else:
-			return obj
-
-	def encode(self, obj):
-		return super(JSON_Typer, self).encode(self._encode(obj))
 
 class struct_sockaddr(ctypes.Structure):
 	 _fields_ = [
@@ -442,8 +380,8 @@ def ipv4(src, dst):
 	ttl = 64
 	protocol = 17 # udp
 	header_checksum = b'\x39\x94'
-	source_address = b''.join([struct.pack('B', int(src_part)) for src_part in src.split('.')])
-	destination_address = b''.join([struct.pack('B', int(dst_part)) for dst_part in dst.split('.')])
+	source_address = b''.join([struct.pack('B', int(src_part)) for src_part in str(src).split('.')])
+	destination_address = b''.join([struct.pack('B', int(dst_part)) for dst_part in str(dst).split('.')])
 
 	return (
 		struct.pack('B', version_header_length)
@@ -1137,11 +1075,17 @@ class FrameResponse(pydantic.BaseModel):
 	def validator(cls, frame) -> DHCPResponse:
 		# Assemble the packet headers
 		packet = b''
-		packet += ethernet(src=frame.server.mac, dst=frame.Ethernet.source) + b'\x81\x00'
-		packet += struct.pack('>h', 0b0000000000000010) + struct.pack('H', frame.auxillary_data[0].vlan)# vlan(struct.pack('>h', 0b0000000000000010) + b'\x08\x00')
-		packet += ipv4(src='172.23.0.1', dst='255.255.255.255')
+		packet += ethernet(src=frame.server.mac, dst=frame.Ethernet.source)
+		if frame.auxillary_data[0].vlan:
+			packet += b'\x81\x00' # Ethernet frame type is 802.1Q VLAN (0x8100)
+			packet += struct.pack('>H', frame.auxillary_data[0].vlan)
+		
+		# Payload to Ethernet/VLAN frame is IPv4
+		packet += b'\x08\x00'
+		packet += ipv4(src=list(frame.server.ip)[0], dst='255.255.255.255')
 		packet += udp(src=67, dst=68)
 
+		return DHCPResponse(request_frame=frame, data=packet)
 
 		# Assemble the DHCP specific payload
 		packet += dhcp_fields.dhcp_offer()
@@ -1233,7 +1177,12 @@ class DHCPServer:
 			yield ip
 
 	def initiate(self):
+		# https://stackoverflow.com/questions/1117958/how-do-i-use-raw-socket-in-python
+		# https://stackoverflow.com/a/27823680/929999
 		self.socket = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(ETH_P_ALL))
+		# https://elixir.bootlin.com/linux/v4.3/source/include/uapi/linux/if_packet.h#L25
+		# https://man7.org/linux/man-pages/man7/packet.7.html#Address_types
+		# self.socket.bind((self.configuration.interface, socket.ntohs(ETH_P_ALL), 0))#, hatype, haddr))
 		self.socket.setsockopt(SOL_PACKET, PACKET_AUXDATA, 1)
 		self.promisciousMode = promisc(self.socket, bytes(self.configuration.interface, 'UTF-8'))
 		self.promisciousMode.on()
@@ -1301,8 +1250,13 @@ class DHCPServer:
 		# messages to 0xffffffff.
 		
 		# if self.bind_to == '255.255.255.255':
-		print(f"[-] Broadcasting back response")
-		self.socket.sendmsg([response.frame.data], response.frame.request_frame.auxillary_data_raw, response.frame.request_frame.flags, ('255.255.255.255', 68))
+
+		if response.frame.request_frame.auxillary_data[0].vlan:
+			log(f"[-] Broadcasting back response on vlan {response.frame.request_frame.auxillary_data[0].vlan}:", [response.frame.data], response.frame.request_frame.auxillary_data_raw, response.frame.request_frame.flags, ('255.255.255.255', 68))
+			self.socket.sendmsg([response.frame.data], response.frame.request_frame.auxillary_data_raw, response.frame.request_frame.flags, ('255.255.255.255', 68))
+		else:
+			log(f"[-] Broadcasting back response:", response.frame.data)
+			self.socket.sendto(response.frame.data, ('255.255.255.255', 68))
 		# else:
 		# 	print(f"[-] Sending directly to {addr}")
 		# 	self.socket.sendmsg([packet], auxillary_data_raw, flags, addr)
