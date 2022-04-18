@@ -1090,6 +1090,7 @@ class FrameResponse(pydantic.BaseModel):
 		packet += dhcp_fields.hardware_type('ethernet')
 		packet += dhcp_fields.hardware_address_length(6)
 		packet += dhcp_fields.hops(frame.request.hops)
+		print('Responding to:', frame.request.transaction_id)
 		packet += dhcp_fields.transaction_id(frame.request.transaction_id)
 		packet += dhcp_fields.seconds_elapsed(0)
 		# https://www.ietf.org/rfc/rfc2131.txt
@@ -1120,13 +1121,13 @@ class FrameResponse(pydantic.BaseModel):
 		elif frame.request.options.option_53.data == 3: # DHCP Request
 			packet += dhcp_fields.TYPE('ACK')
 
-		packet += dhcp_fields.server_identifier('172.22.0.2')
+		packet += dhcp_fields.server_identifier('192.168.0.1')
 		packet += dhcp_fields.lease_time(43200)
 		packet += dhcp_fields.renewal_time(21600)
 		packet += dhcp_fields.rebind_time(37800)
 		packet += dhcp_fields.subnet('255.255.255.0')
-		packet += dhcp_fields.broadcast_addr('172.22.0.255')
-		packet += dhcp_fields.router('172.22.0.1')
+		packet += dhcp_fields.broadcast_addr('192.168.0.255')
+		packet += dhcp_fields.router('192.168.0.1')
 		packet += dhcp_fields.dns_servers('8.8.8.8', '4.4.4.4')
 		packet += b'\xff'   #End Option
 
