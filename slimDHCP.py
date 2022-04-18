@@ -1075,7 +1075,7 @@ class FrameResponse(pydantic.BaseModel):
 	def validator(cls, frame) -> DHCPResponse:
 		# Assemble the packet headers
 		packet = b''
-		packet += ethernet(src=frame.server.mac, dst=frame.Ethernet.source)
+		packet += ethernet(src=frame.server.mac, dst='ff:ff:ff:ff:ff:ff')
 		if frame.auxillary_data[0].vlan:
 			packet += b'\x81\x00' # Ethernet frame type is 802.1Q VLAN (0x8100)
 			packet += struct.pack('>H', frame.auxillary_data[0].vlan)
@@ -1251,12 +1251,13 @@ class DHCPServer:
 		
 		# if self.bind_to == '255.255.255.255':
 
-		if response.frame.request_frame.auxillary_data[0].vlan:
-			log(f"[-] Broadcasting back response on vlan {response.frame.request_frame.auxillary_data[0].vlan}:", [response.frame.data], response.frame.request_frame.auxillary_data_raw, response.frame.request_frame.flags, ('255.255.255.255', 68))
-			self.socket.sendmsg([response.frame.data], response.frame.request_frame.auxillary_data_raw, response.frame.request_frame.flags, ('255.255.255.255', 68))
-		else:
-			log(f"[-] Broadcasting back response:", response.frame.data)
-			self.socket.sendto(response.frame.data, ('255.255.255.255', 68))
+		#if response.frame.request_frame.auxillary_data[0].vlan:
+		log(f"Broadcasting DHCP response on vlan {response.frame.request_frame.auxillary_data[0].vlan}:", [response.frame.data], response.frame.request_frame.auxillary_data_raw, response.frame.request_frame.flags, (response.frame.request_frame.server.configuration.interface, 68), fg="green", level=logging.INFO)
+		self.socket.sendmsg([response.frame.data], response.frame.request_frame.auxillary_data_raw, response.frame.request_frame.flags, (response.frame.request_frame.server.configuration.interface, 68))
+		#else:
+		#	log(f"[-] Broadcasting back response:", response.frame.data)
+		#	self.socket.sendmsg([response.frame.data], response.frame.request_frame.auxillary_data_raw, response.frame.request_frame.flags, ('enp3s0', 68))
+		#	#self.socket.sendto(response.frame.data, ('enp3s0', 68))
 		# else:
 		# 	print(f"[-] Sending directly to {addr}")
 		# 	self.socket.sendmsg([packet], auxillary_data_raw, flags, addr)
