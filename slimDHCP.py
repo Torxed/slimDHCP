@@ -513,7 +513,7 @@ class dhcp_fields(abc.ABCMeta):
 
 	@abc.abstractmethod
 	def transaction_id(identifier :int):
-		return struct.pack('>I', identifier)
+		return struct.pack('>i', identifier)
 
 	@abc.abstractmethod
 	def seconds_elapsed(t=0):
