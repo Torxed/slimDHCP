@@ -567,7 +567,7 @@ class dhcp_fields(abc.ABCMeta):
 		return struct.pack('B', n)
 
 	@abc.abstractmethod
-	def identifier(addr):
+	def server_identifier(addr):
 		"""
 		@option: 54
 		@link: https://tools.ietf.org/html/rfc2132#section-9.7
@@ -1072,7 +1072,7 @@ class FrameResponse(pydantic.BaseModel):
 	frame: DHCPResponse
 
 	@pydantic.validator("frame", pre=True)
-	def validator(cls, frame) -> DHCPResponse:
+	def validator(cls, frame :DHCPRequest) -> DHCPResponse:
 		# Assemble the packet headers
 		packet = b''
 		packet += ethernet(src=frame.server.mac, dst='ff:ff:ff:ff:ff:ff')
@@ -1084,8 +1084,6 @@ class FrameResponse(pydantic.BaseModel):
 		packet += b'\x08\x00'
 		packet += ipv4(src=list(frame.server.ip)[0], dst='255.255.255.255')
 		packet += udp(src=67, dst=68)
-
-		return DHCPResponse(request_frame=frame, data=packet)
 
 		# Assemble the DHCP specific payload
 		packet += dhcp_fields.dhcp_offer()
@@ -1117,6 +1115,21 @@ class FrameResponse(pydantic.BaseModel):
 		packet += b'\x00' * 128 # TODO: Unknown
 		packet += dhcp_fields.magic_cookie()
 
+		if frame.request.options.option_53.data == 1: # DHCP Discover
+			packet += dhcp_fields.TYPE('OFFER')
+		elif frame.request.options.option_53.data == 3: # DHCP Request
+			packet += dhcp_fields.TYPE('ACK')
+
+		packet += dhcp_fields.server_identifier('172.22.0.2')
+		packet += dhcp_fields.lease_time(43200)
+		packet += dhcp_fields.renewal_time(21600)
+		packet += dhcp_fields.rebind_time(37800)
+		packet += dhcp_fields.subnet('255.255.255.0')
+		packet += dhcp_fields.broadcast_addr('172.22.0.255')
+		packet += dhcp_fields.router('172.22.0.1')
+		packet += dhcp_fields.dns_servers('8.8.8.8', '4.4.4.4')
+		packet += b'\xff'   #End Option
+
 		"""
 		## This is basically what differs in a basic basic DHCP sequence,
 		## the message type recieved and matching response. At least for a basic IP request/handshake.
@@ -1132,15 +1145,8 @@ class FrameResponse(pydantic.BaseModel):
 		packet += dhcp_fields.identifier(self.bind_to)
 		
 		# We don't honor these, so we're generous with them:
-		packet += dhcp_fields.lease_time(43200)
-		packet += dhcp_fields.renewal_time(21600)
-		packet += dhcp_fields.rebind_time(37800)
 
 		# And the IP, subnet, router(gateway) and DNS information.
-		packet += dhcp_fields.subnet(self.subnet.netmask)
-		packet += dhcp_fields.broadcast_addr(self.subnet.broadcast_address)
-		packet += dhcp_fields.router(self.gateway)
-		packet += dhcp_fields.dns_servers(*self.dns_servers)
 
 		# If we have a PXE binary to deliver, add the appropriate options to the request:
 		if self.pxe_bin:
